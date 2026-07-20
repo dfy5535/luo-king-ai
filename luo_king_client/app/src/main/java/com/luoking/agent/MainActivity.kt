@@ -62,7 +62,7 @@ class MainActivity : Activity() {
     }
 
     private fun connect() {
-        val serverUrl = "ws://localhost:8765"
+        val serverUrl = "ws://192.168.10.189:8765"
         updateStatus("连接中...", Color.DKGRAY)
         connectBtn.isEnabled = false
 
