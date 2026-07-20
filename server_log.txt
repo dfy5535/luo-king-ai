@@ -1,0 +1,75 @@
+2026-07-20 02:36:25,386 [asyncio] DEBUG: Using selector: EpollSelector
+2026-07-20 02:36:25,388 [luo_king_server.server.test_gateway] INFO: 🧪 测试模式服务器启动: ws://0.0.0.0:8765
+2026-07-20 02:36:25,388 [luo_king_server.server.test_gateway] INFO:     收到 upload 后返回固定 tap 动作，不依赖任何 AI
+2026-07-20 02:36:25,388 [luo_king_server.server.test_gateway] INFO:     按 Ctrl+C 停止
+2026-07-20 02:36:25,504 [websockets.server] INFO: server listening on 0.0.0.0:8765
+2026-07-20 02:36:38,495 [websockets.server] DEBUG: = connection is CONNECTING
+2026-07-20 02:36:38,496 [websockets.server] DEBUG: > EOF
+2026-07-20 02:36:38,496 [websockets.server] DEBUG: < EOF
+2026-07-20 02:36:38,497 [websockets.server] DEBUG: = connection is CLOSED
+2026-07-20 02:36:38,497 [websockets.server] DEBUG: x half-closing TCP connection
+2026-07-20 02:36:38,497 [websockets.server] ERROR: opening handshake failed
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/websockets/http11.py", line 138, in parse
+    request_line = yield from parse_line(read_line)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/websockets/http11.py", line 320, in parse_line
+    line = yield from read_line(MAX_LINE_LENGTH)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/websockets/streams.py", line 46, in read_line
+    raise EOFError(f"stream ends after {p} bytes, before end of line")
+EOFError: stream ends after 0 bytes, before end of line
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/websockets/server.py", line 547, in parse
+    request = yield from Request.parse(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/websockets/http11.py", line 140, in parse
+    raise EOFError("connection closed while reading HTTP request line") from exc
+EOFError: connection closed while reading HTTP request line
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/websockets/asyncio/server.py", line 356, in conn_handler
+    await connection.handshake(
+  File "/usr/local/lib/python3.12/dist-packages/websockets/asyncio/server.py", line 207, in handshake
+    raise self.protocol.handshake_exc
+websockets.exceptions.InvalidMessage: did not receive a valid HTTP request
+2026-07-20 02:36:53,611 [websockets.server] DEBUG: = connection is CONNECTING
+2026-07-20 02:36:53,613 [websockets.server] DEBUG: > EOF
+2026-07-20 02:36:53,613 [websockets.server] DEBUG: < EOF
+2026-07-20 02:36:53,613 [websockets.server] DEBUG: = connection is CLOSED
+2026-07-20 02:36:53,613 [websockets.server] DEBUG: x half-closing TCP connection
+2026-07-20 02:36:53,614 [websockets.server] ERROR: opening handshake failed
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/websockets/http11.py", line 138, in parse
+    request_line = yield from parse_line(read_line)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/websockets/http11.py", line 320, in parse_line
+    line = yield from read_line(MAX_LINE_LENGTH)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/websockets/streams.py", line 46, in read_line
+    raise EOFError(f"stream ends after {p} bytes, before end of line")
+EOFError: stream ends after 0 bytes, before end of line
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/websockets/server.py", line 547, in parse
+    request = yield from Request.parse(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/websockets/http11.py", line 140, in parse
+    raise EOFError("connection closed while reading HTTP request line") from exc
+EOFError: connection closed while reading HTTP request line
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/websockets/asyncio/server.py", line 356, in conn_handler
+    await connection.handshake(
+  File "/usr/local/lib/python3.12/dist-packages/websockets/asyncio/server.py", line 207, in handshake
+    raise self.protocol.handshake_exc
+websockets.exceptions.InvalidMessage: did not receive a valid HTTP request

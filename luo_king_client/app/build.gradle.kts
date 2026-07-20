@@ -26,6 +26,5 @@ android {
 }
 
 dependencies {
-    // Stage 1: WebSocket
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }

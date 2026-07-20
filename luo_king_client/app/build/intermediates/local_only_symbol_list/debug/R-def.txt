@@ -1,0 +1,17 @@
+R_DEF: Internal format may change without notice
+local
+id connect_btn
+id server_address
+id stats_text
+id status_text
+layout activity_main
+string accessibility_description
+string app_name
+string connect
+string disconnect
+string server_address
+string status_connected
+string status_disconnected
+string status_ready
+style Theme.LuoKingAgent
+xml accessibility_service_config
