@@ -1,0 +1,161 @@
+package com.luoking.agent
+
+import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
+import android.media.Image
+import android.media.ImageReader
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.util.DisplayMetrics
+import android.util.Log
+import android.view.WindowManager
+import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.Executors
+
+/**
+ * 无障碍服务 - 截图 + 点击执行
+ *
+ * 这是 APK 的"手"。
+ * 不参与任何决策，只做两件事：
+ * 1. 截图（通过 ImageReader 或 MediaProjection）
+ * 2. 点击（通过 AccessibilityService dispatchGesture）
+ */
+class CaptureService : AccessibilityService() {
+
+    companion object {
+        private const val TAG = "CaptureService"
+        private var instance: CaptureService? = null
+
+        fun getInstance(): CaptureService? = instance
+
+        /** 截图并返回 Base64 */
+        fun takeScreenshot(): String? = instance?.captureScreen()
+
+        /** 执行点击 */
+        fun performTap(x: Int, y: Int): Boolean = instance?.tap(x, y) ?: false
+    }
+
+    private val handler = Handler(Looper.getMainLooper())
+    private val executor = Executors.newSingleThreadExecutor()
+    private var imageReader: ImageReader? = null
+
+    override fun onServiceConnected() {
+        instance = this
+        Log.d(TAG, "无障碍服务已连接")
+
+        // 配置服务信息
+        val info = AccessibilityServiceInfo().apply {
+            eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+            feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
+            flags = AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            notificationTimeout = 100
+        }
+        serviceInfo = info
+
+        // 初始化 ImageReader 用于截图
+        setupImageReader()
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // 不需要处理事件，只做截图和点击
+    }
+
+    override fun onInterrupt() {
+        Log.d(TAG, "服务中断")
+    }
+
+    override fun onDestroy() {
+        instance = null
+        imageReader?.close()
+        super.onDestroy()
+    }
+
+    // ── 截图 ──
+
+    private fun setupImageReader() {
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val metrics = DisplayMetrics()
+        wm.defaultDisplay.getRealMetrics(metrics)
+
+        imageReader = ImageReader.newInstance(
+            metrics.widthPixels, metrics.heightPixels,
+            PixelFormat.RGBA_8888, 2
+        )
+    }
+
+    private fun captureScreen(): String? {
+        return try {
+            // 使用 ImageReader 截图
+            val reader = imageReader ?: return null
+            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val metrics = DisplayMetrics()
+            wm.defaultDisplay.getRealMetrics(metrics)
+
+            // 获取最新帧
+            val image: Image? = reader.acquireLatestImage()
+            if (image == null) {
+                Log.w(TAG, "截图失败：无法获取图片帧")
+                return null
+            }
+
+            // 转换为 Bitmap
+            val planes = image.planes
+            val buffer = planes[0].buffer
+            val pixelStride = planes[0].pixelStride
+            val rowStride = planes[0].rowStride
+            val rowPadding = rowStride - pixelStride * metrics.widthPixels
+
+            val bitmap = Bitmap.createBitmap(
+                metrics.widthPixels + rowPadding / pixelStride,
+                metrics.heightPixels,
+                Bitmap.Config.ARGB_8888
+            )
+            bitmap.copyPixelsFromBuffer(buffer)
+            image.close()
+
+            // 压缩为 JPEG
+            val outputStream = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 85, outputStream)
+            val bytes = outputStream.toByteArray()
+            bitmap.recycle()
+
+            // 转 Base64
+            android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        } catch (e: Exception) {
+            Log.e(TAG, "截图失败", e)
+            null
+        }
+    }
+
+    // ── 点击 ──
+
+    private fun tap(x: Int, y: Int): Boolean {
+        return try {
+            // 使用 AccessibilityService 的手势 API
+            val path = android.graphics.Path().apply {
+                moveTo(x.toFloat(), y.toFloat())
+            }
+            val gesture = android.accessibilityservice.GestureDescription.Builder()
+                .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(
+                    path, 0, 50  // 50ms 点击时长
+                ))
+                .build()
+
+            dispatchGesture(gesture, null, null)
+            Log.d(TAG, "点击: ($x, $y)")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "点击失败: ($x, $y)", e)
+            false
+        }
+    }
+}

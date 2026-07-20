@@ -1,0 +1,318 @@
+"""
+luo_king_agent/vision/llm_parser.py
+=====================================
+Operator的要求：
+  "SenseNova 6.7 Flash-Lite（直接看图片）"
+  "SenseNova 不负责决策。SenseNova 负责：看图片、OCR、识别宠物、识别技能、识别HP、识别天气、输出BattleState"
+
+这个模块用多模态LLM替代传统OCR。
+把截图直接发给SenseNova，让它输出结构化JSON。
+"""
+
+from __future__ import annotations
+from typing import Optional, List, Dict, Any
+import logging
+import json
+import base64
+import os
+import time
+from dataclasses import dataclass
+
+from ..core.models import (
+    BattleState, PetState, SkillState, PetType, WeatherType,
+    StatusCondition, BuffType, GamePhase, BattleActionType,
+    ScreenCoordinate
+)
+
+logger = logging.getLogger(__name__)
+
+
+class LLMVisionParser:
+    """
+    基于多模态LLM的视觉解析器。
+    
+    架构：
+    截图 → Base64 → SenseNova 6.7 Flash-Lite → JSON → BattleState
+    
+    设计原则：
+    - 不依赖传统OCR
+    - 输出严格结构化的JSON
+    - 置信度评估
+    - 可降级到模板匹配（当LLM调用失败时）
+    """
+    
+    # 系统提示词 - 要求模型严格输出JSON
+    BATTLE_SCENE_PROMPT = """你是一个洛克王国游戏状态解析器。你的任务是从游戏截图中提取战斗状态。
+
+请仔细观察截图，提取以下信息，并以严格JSON格式返回：
+
+{
+  "game_phase": "battle" | "lobby" | "matching" | "pet_select" | "settlement" | "login" | "unknown",
+  "is_my_turn": true | false,
+  "turn_number": 整数（如果可见）,
+  "weather": "sunny" | "rainy" | "snowstorm" | "sandstorm" | "mist" | "none",
+  
+  "my_active_pet": {
+    "name": "宠物名称",
+    "hp_current": 整数,
+    "hp_max": 整数,
+    "level": 整数,
+    "status": "none" | "poisoned" | "paralyzed" | "burned" | "frozen" | "sleeping" | "confused",
+    "skills": [
+      {"name": "技能名", "pp_current": 整数, "pp_max": 整数, "sealed": false}
+    ]
+  },
+  
+  "my_other_pets": [
+    {"name": "宠物名", "hp_current": 整数, "hp_max": 整数, "alive": true}
+  ],
+  
+  "enemy_pet": {
+    "name": "宠物名称",
+    "hp_current": 整数,
+    "hp_max": 整数,
+    "level": 整数,
+    "status": "none" | "poisoned" | ...,
+    "buffs": {"攻击": 0, "防御": 0, "速度": 0},
+    "types_observed": ["类型1", "类型2"]
+  },
+  
+  "battlefield_effects": ["护盾", "反射", "撒菱", ...],
+  "available_buttons": ["技能1", "技能2", "技能3", "技能4", "宠物", "道具", "逃跑"],
+  
+  "confidence_notes": "如果某些信息不确定，在这里说明"
+}
+
+注意：
+- 只输出JSON，不要额外文字
+- 如果某个信息不可见，使用null
+- HP数值从HP条位置估算，尽量精确
+- 技能名称必须准确
+- 如果无法确定，confidence_notes中说明"""
+    
+    def __init__(self, llm_client=None, model: str = "sensenova-6.7-flash-lite"):
+        self.llm_client = llm_client
+        self.model = model
+        self._fallback_parser = None  # 传统OCR降级
+        
+    def parse_screenshot(self, image_path: str) -> BattleState:
+        """
+        解析截图 → BattleState。
+        
+        优先使用LLM多模态视觉。
+        失败时降级到传统OCR。
+        """
+        state = BattleState()
+        state.screenshot_timestamp = time.time()
+        
+        # 方案A：LLM多模态
+        if self.llm_client:
+            try:
+                llm_result = self._call_llm_vision(image_path)
+                state = self._llm_json_to_state(llm_result)
+                state.parse_confidence = self._estimate_confidence(llm_result)
+                if state.parse_confidence > 0.5:
+                    return state
+            except Exception as e:
+                logger.warning(f"LLM视觉解析失败: {e}")
+        
+        # 方案B：降级到传统OCR
+        logger.info("降级到传统OCR解析")
+        if self._fallback_parser:
+            return self._fallback_parser.parse_screenshot(image_path)
+        
+        state.parse_confidence = 0.0
+        return state
+    
+    def _call_llm_vision(self, image_path: str) -> Dict[str, Any]:
+        """
+        调用SenseNova多模态模型。
+        图片 → Base64 → API → JSON
+        """
+        # 读取图片并转Base64
+        with open(image_path, "rb") as f:
+            image_data = base64.b64encode(f.read()).decode("utf-8")
+        
+        # 获取图片格式
+        ext = os.path.splitext(image_path)[1].lower()
+        media_type = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+        }.get(ext, "image/png")
+        
+        # 构造请求
+        response = self.llm_client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": self.BATTLE_SCENE_PROMPT
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "请分析这张洛克王国战斗截图，输出JSON格式的战斗状态。"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{media_type};base64,{image_data}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            temperature=0.1,  # 低温度，减少随机性
+            max_tokens=2000,
+            response_format={"type": "json_object"},
+        )
+        
+        content = response.choices[0].message.content
+        # 提取JSON
+        result = json.loads(content)
+        return result
+    
+    def _llm_json_to_state(self, data: Dict[str, Any]) -> BattleState:
+        """将LLM输出的JSON转换为BattleState"""
+        state = BattleState()
+        
+        # 游戏阶段
+        phase_map = {
+            "battle": GamePhase.战斗,
+            "lobby": GamePhase.大厅,
+            "matching": GamePhase.匹配中,
+            "pet_select": GamePhase.选宠,
+            "settlement": GamePhase.结算,
+            "login": GamePhase.登录,
+        }
+        state.phase = phase_map.get(data.get("game_phase", ""), GamePhase.未知)
+        
+        state.is_my_turn = data.get("is_my_turn", False)
+        state.turn_number = data.get("turn_number", 0)
+        
+        # 天气
+        weather_map = {
+            "sunny": WeatherType.晴天,
+            "rainy": WeatherType.雨天,
+            "snowstorm": WeatherType.暴风雪,
+            "sandstorm": WeatherType.沙暴,
+            "mist": WeatherType.迷雾,
+        }
+        state.weather = weather_map.get(data.get("weather", "none"), WeatherType.无)
+        
+        # 我方出战宠物
+        my_data = data.get("my_active_pet", {})
+        if my_data and my_data.get("name"):
+            my_pet = self._parse_pet_from_json(my_data)
+            my_pet.is_active = True
+            state.my_active = my_pet
+            state.my_pets.append(my_pet)
+        
+        # 我方其他宠物
+        for other in data.get("my_other_pets", []):
+            pet = PetState(
+                name=other.get("name", "未知"),
+                hp_current=other.get("hp_current", 0),
+                hp_max=other.get("hp_max", 0),
+                is_alive=other.get("alive", True),
+            )
+            state.my_pets.append(pet)
+        
+        # 敌方宠物
+        enemy_data = data.get("enemy_pet", {})
+        if enemy_data and enemy_data.get("name"):
+            enemy = self._parse_pet_from_json(enemy_data)
+            enemy.is_active = True
+            state.enemy_pet = enemy
+        
+        # 战场效果
+        state.battlefield_effects = {
+            "effects": data.get("battlefield_effects", [])
+        }
+        
+        return state
+    
+    def _parse_pet_from_json(self, data: Dict[str, Any]) -> PetState:
+        """从JSON字典解析宠物"""
+        pet = PetState(
+            name=data.get("name", "未知"),
+            hp_current=data.get("hp_current", 0),
+            hp_max=data.get("hp_max", 0),
+            level=data.get("level", 100),
+        )
+        
+        # 技能
+        for skill_data in data.get("skills", []):
+            skill = SkillState(
+                name=skill_data.get("name", "未知技能"),
+                pp_current=skill_data.get("pp_current", 0),
+                pp_max=skill_data.get("pp_max", 0),
+                is_sealed=skill_data.get("sealed", False),
+            )
+            pet.skills.append(skill)
+        
+        # 异常状态
+        status_map = {
+            "none": StatusCondition.无,
+            "poisoned": StatusCondition.中毒,
+            "paralyzed": StatusCondition.麻痹,
+            "burned": StatusCondition.烧伤,
+            "frozen": StatusCondition.冰冻,
+            "sleeping": StatusCondition.睡眠,
+            "confused": StatusCondition.迷惑,
+        }
+        pet.status = status_map.get(data.get("status", "none"), StatusCondition.无)
+        
+        # Buff
+        buffs = data.get("buffs", {})
+        buff_map = {
+            "攻击": BuffType.攻击, "防御": BuffType.防御,
+            "魔攻": BuffType.魔攻, "魔抗": BuffType.魔抗,
+            "速度": BuffType.速度, "命中": BuffType.命中,
+            "闪避": BuffType.闪避,
+        }
+        for cn_name, level in buffs.items():
+            if cn_name in buff_map and level != 0:
+                pet.buffs[buff_map[cn_name]] = level
+        
+        return pet
+    
+    def _estimate_confidence(self, data: Dict[str, Any]) -> float:
+        """估算解析置信度"""
+        score = 0.0
+        
+        # 核心字段存在即加分
+        if data.get("game_phase"):
+            score += 0.2
+        if data.get("my_active_pet", {}).get("name"):
+            score += 0.2
+            pet = data["my_active_pet"]
+            if pet.get("hp_current") is not None and pet.get("hp_max") is not None:
+                score += 0.15
+            if pet.get("skills"):
+                score += 0.15
+        if data.get("enemy_pet", {}).get("name"):
+            score += 0.2
+        if data.get("is_my_turn") is not None:
+            score += 0.1
+        
+        return min(1.0, score)
+
+
+class TemplateParser:
+    """
+    传统模板匹配/OCR解析器（降级方案）。
+    当LLM视觉解析失败时使用。
+    """
+    
+    def parse_screenshot(self, image_path: str) -> BattleState:
+        """降级解析"""
+        state = BattleState()
+        state.parse_confidence = 0.3
+        state.phase = GamePhase.战斗
+        state.is_my_turn = True
+        return state

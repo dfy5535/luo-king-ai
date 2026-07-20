@@ -1,0 +1,8 @@
+# luo_king_client 依赖
+# 手机终端运行在 Android 设备上
+
+# 如果需要 Python 客户端（模拟）
+websockets>=12.0
+
+# ADB 控制
+# adb-shell>=0.4  # 可选：Python ADB 实现

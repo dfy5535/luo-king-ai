@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+luo_king_agent - 视觉驱动的游戏智能体（Vision-Driven Game Agent）
+================================================================
+设计者：Operator
+实现者：KIRA
+
+设计哲学：
+  "AI应该像人一样玩游戏，而不是像程序一样玩游戏。"
+  "图片不是输入。状态才是输入。"
+  "AI不是第一步，AI是最后一步。"
+
+架构：
+  游戏画面 → 视觉解析 → 战斗引擎 → 策略Agent → 执行层 → 日志与录像
+"""
+
+from luo_king_agent.orchestrator import GameAgent
+from luo_king_agent.core.models import (
+    BattleState, BattleAction, GamePhase,
+    PetState, SkillState, PetType, WeatherType, StatusCondition
+)
+from luo_king_agent.engine.battle_engine import BattleEngine, BattleRecommendation, PetDatabase
+from luo_king_agent.agents.strategy_agent import StrategyAgent
+from luo_king_agent.agents.rule_agent import RuleAgent
+from luo_king_agent.vision.parser import VisionParser
+from luo_king_agent.executor.executor import Executor, ADBController
+from luo_king_agent.state_machine.game_state_machine import GameStateMachine
+from luo_king_agent.learning.replay_analyzer import ReplayAnalyzer, BattleRecord
+import logging
+
+
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+        datefmt='%H:%M:%S'
+    )
+
+
+def demo_simulation():
+    """
+    模拟一次完整的战斗决策流程。
+    不需要连接真实设备，展示系统如何工作。
+    """
+    print("=" * 60)
+    print("🎮 视觉驱动游戏智能体 - 模拟演示")
+    print("=" * 60)
+    
+    # 1. 创建模拟状态
+    state = BattleState(
+        phase=GamePhase.战斗,
+        is_my_turn=True,
+        turn_number=5,
+        weather=WeatherType.晴天,
+    )
+    
+    # 我方宠物
+    my_pet = PetState(
+        name="烈火战神",
+        types=[PetType.火],
+        hp_current=156,
+        hp_max=200,
+        skills=[
+            SkillState(name="烈焰冲锋", skill_type=PetType.火, power=120, pp_current=8, pp_max=10),
+            SkillState(name="火焰护盾", skill_type=PetType.火, power=0, pp_current=12, pp_max=15),
+            SkillState(name="速度强化", skill_type=PetType.普通, power=0, pp_current=15, pp_max=20),
+            SkillState(name="热力爆燃", skill_type=PetType.火, power=90, pp_current=5, pp_max=5),
+        ],
+        is_active=True,
+        is_alive=True,
+    )
+    state.my_active = my_pet
+    state.my_pets = [my_pet]
+    
+    # 敌方宠物
+    enemy = PetState(
+        name="冰龙王",
+        types=[PetType.冰, PetType.龙],
+        hp_current=82,
+        hp_max=220,
+        is_active=True,
+        is_alive=True,
+    )
+    state.enemy_pet = enemy
+    
+    # 2. 打印状态
+    print("\n📊 当前战斗状态:")
+    print(state.to_prompt_context())
+    
+    # 3. Battle Engine分析
+    print("\n🔧 Battle Engine分析中...")
+    engine = BattleEngine()
+    engine.update_state(state)
+    rec = engine.analyze()
+    
+    print("\n📋 引擎分析结果:")
+    print(rec.to_prompt_context())
+    
+    # 4. 策略Agent决策
+    print("\n🧠 策略Agent决策中...")
+    agent = StrategyAgent()
+    action = agent.decide(state, rec)
+    
+    print(f"\n✅ 最终决策: {action.action_type.value} → {action.target}")
+    print(f"   理由: {action.reasoning}")
+    print(f"   置信度: {action.confidence:.2%}")
+    
+    print("\n" + "=" * 60)
+    print("✨ 模拟完成")
+    print("=" * 60)
+
+
+def main():
+    setup_logging()
+    
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--demo":
+        demo_simulation()
+    else:
+        print("启动方式:")
+        print("  python main.py --demo    # 模拟演示")
+        print("  python main.py          # 连接真实设备运行")
+        print("\n需要先配置设备连接参数。")
+
+
+if __name__ == "__main__":
+    main()

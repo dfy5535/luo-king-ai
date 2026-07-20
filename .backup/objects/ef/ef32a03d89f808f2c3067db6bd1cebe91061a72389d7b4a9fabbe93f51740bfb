@@ -1,0 +1,83 @@
+// 洛克王国 AI 助手 · 通信协议 v1.0
+// 协议文档：PROTOCOL.md
+// 两端必须严格一致，任何修改须同步更新 PROTOCOL.md
+
+package com.luoking.agent.models
+
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerialName
+
+// ── 客户端 → 服务器 ──
+
+/**
+ * 心跳
+ * 每 5 秒发送一次
+ */
+@Serializable
+data class Heartbeat(
+    val type: String = "heartbeat",
+    @SerialName("device_id") val deviceId: String,
+    val phase: String = "unknown",
+    val battery: Int = 0,
+    val ts: Long = 0
+)
+
+/**
+ * 上传截图
+ * JPEG Base64，100-300KB
+ */
+@Serializable
+data class ScreenshotUpload(
+    val type: String = "upload",
+    @SerialName("device_id") val deviceId: String,
+    val image: String,
+    val ts: Long = 0
+)
+
+/**
+ * 执行结果
+ */
+@Serializable
+data class ActionResult(
+    val type: String = "action_result",
+    @SerialName("device_id") val deviceId: String,
+    val success: Boolean,
+    val ts: Long = 0
+)
+
+// ── 服务器 → 客户端 ──
+
+/**
+ * 心跳确认
+ */
+@Serializable
+data class HeartbeatAck(
+    val type: String = "heartbeat_ack",
+    @SerialName("server_time") val serverTime: Long = 0,
+    @SerialName("session_id") val sessionId: String = ""
+)
+
+/**
+ * 动作指令
+ */
+@Serializable
+data class ServerAction(
+    val type: String = "action",
+    @SerialName("action_type") val actionType: String = "wait",
+    @SerialName("skill_index") val skillIndex: Int? = null,
+    @SerialName("swap_index") val swapIndex: Int? = null,
+    val coordinate: List<Int>? = null,
+    @SerialName("delay_ms") val delayMs: Int = 500,
+    val reasoning: String = "",
+    @SerialName("session_id") val sessionId: String = ""
+)
+
+/**
+ * 错误消息
+ */
+@Serializable
+data class ServerError(
+    val type: String = "error",
+    val message: String = "",
+    val code: String = ""
+)

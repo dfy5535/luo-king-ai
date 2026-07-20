@@ -1,0 +1,51 @@
+package com.luoking.agent
+
+import android.app.Application
+import android.util.Log
+
+/**
+ * 应用入口
+ */
+class MainApplication : Application() {
+
+    companion object {
+        private const val TAG = "MainApplication"
+
+        // 当前游戏阶段（由服务器更新）
+        var currentPhase: String = "unknown"
+
+        // 设备ID
+        lateinit var deviceId: String
+            private set
+
+        // 服务器地址
+        lateinit var serverUrl: String
+            private set
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+
+        // 从配置读取设备ID和服务器地址
+        deviceId = "phone_${android.provider.Settings.Secure.getString(
+            contentResolver,
+            android.provider.Settings.Secure.ANDROID_ID
+        )?.takeLast(6) ?: "unknown"}"
+
+        serverUrl = "ws://193.112.187.72:8765"  // 默认服务器地址
+        // 实际应从 SharedPreferences 读取
+
+        Log.d(TAG, "应用启动: deviceId=$deviceId")
+    }
+
+    override fun onTerminate() {
+        super.onTerminate()
+        Log.d(TAG, "应用终止")
+    }
+
+    companion object {
+        lateinit var instance: MainApplication
+            private set
+    }
+}

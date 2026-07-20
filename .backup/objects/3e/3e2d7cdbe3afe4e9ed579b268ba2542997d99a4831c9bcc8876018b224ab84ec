@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="24dp"
+    android:gravity="center_horizontal">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="洛克王国 AI 助手"
+        android:textSize="24sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="32dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="手机终端 v1.0"
+        android:textSize="14sp"
+        android:textColor="#888888"
+        android:layout_marginBottom="32dp" />
+
+    <TextView
+        android:id="@+id/status_text"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:gravity="center"
+        android:text="❌ 需要无障碍权限"
+        android:textSize="16sp"
+        android:background="#F5F5F5"
+        android:layout_marginBottom="24dp" />
+
+    <EditText
+        android:id="@+id/server_address"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:hint="服务器地址 (ws://...)"
+        android:text="ws://193.112.187.72:8765"
+        android:padding="12dp"
+        android:background="#F0F0F0"
+        android:layout_marginBottom="16dp" />
+
+    <Button
+        android:id="@+id/connect_btn"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:text="连接"
+        android:textSize="18sp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="\n使用说明：\n1. 点击「连接」后授权无障碍权限\n2. 打开洛克王国开始对战\n3. AI会自动控制战斗\n\n注意：\n- 首次使用需在设置中开启无障碍服务\n- 请确保手机已连接到互联网"
+        android:textSize="13sp"
+        android:textColor="#666666"
+        android:layout_marginTop="24dp"
+        android:lineSpacingExtra="4dp" />
+
+</LinearLayout>

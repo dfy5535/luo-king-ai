@@ -1,0 +1,236 @@
+"""
+luo_king_agent/executor/executor.py
+====================================
+Operator的要求：
+  "执行Agent：负责点击哪里？"
+  "服务器 → 手机点击"
+
+这个模块负责将BattleAction转换为实际的屏幕操作。
+支持多种执行后端：ADB / 无障碍服务 / 模拟点击。
+"""
+
+from __future__ import annotations
+from typing import Optional, Dict, List, Callable
+import logging
+import time
+import subprocess
+import os
+
+from ..core.models import (
+    BattleAction, BattleActionType, BattleState,
+    ScreenCoordinate, GamePhase
+)
+
+logger = logging.getLogger(__name__)
+
+
+class Executor:
+    """
+    执行器 - 将决策转化为屏幕操作。
+    
+    支持三种执行后端：
+    1. ADB (Android Debug Bridge) - 通过USB/WiFi连接
+    2. 无障碍服务 - 通过Android Accessibility API
+    3. 模拟点击 - 用于测试
+    
+    设计原则：
+    - 执行失败要有重试机制
+    - 每次点击后要等待UI响应
+    - 支持点击坐标缓存
+    """
+    
+    def __init__(self, backend: str = "adb", device_id: Optional[str] = None):
+        self.backend = backend
+        self.device_id = device_id
+        self.click_delay = 0.5  # 点击后等待时间(秒)
+        self.max_retries = 3    # 最大重试次数
+        self.last_action_time = 0.0
+        
+        # 按钮坐标映射（根据分辨率调整）
+        self.button_coords = {
+            "1920x1080": {
+                "技能1": (250, 1000),
+                "技能2": (650, 1000),
+                "技能3": (250, 1100),
+                "技能4": (650, 1100),
+                "换宠1": (1000, 1000),
+                "换宠2": (1300, 1000),
+                "换宠3": (1600, 1000),
+                "确认": (960, 1050),
+                "开始匹配": (960, 650),
+                "跳过动画": (1800, 50),
+            }
+        }
+        self.current_resolution = "1920x1080"
+    
+    def execute(self, action: BattleAction, state: BattleState) -> bool:
+        """
+        执行一个动作。
+        
+        Returns:
+            bool: 是否执行成功
+        """
+        logger.info(f"执行: {action.action_type.value} → {action.target}")
+        
+        if action.action_type == BattleActionType.技能:
+            return self._click_skill(action.target)
+        elif action.action_type == BattleActionType.换宠:
+            return self._click_swap(action.target)
+        elif action.action_type == BattleActionType.使用道具:
+            return self._click_item(action.target)
+        elif action.action_type == BattleActionType.逃跑:
+            return self._click_flee()
+        elif action.action_type == BattleActionType.等待:
+            return self._wait_turn()
+        
+        return False
+    
+    def _click_skill(self, skill_name: str) -> bool:
+        """点击技能按钮"""
+        # 查找技能在技能列表中的位置
+        coords = self._get_coords("技能1")  # 简化：第一个技能
+        return self._tap(coords)
+    
+    def _click_swap(self, pet_name: str) -> bool:
+        """点击换宠"""
+        coords = self._get_coords("换宠1")
+        return self._tap(coords)
+    
+    def _click_item(self, item_name: str) -> bool:
+        """点击道具"""
+        return self._tap((960, 800))
+    
+    def _click_flee(self) -> bool:
+        """点击逃跑"""
+        return self._tap((1700, 100))
+    
+    def _wait_turn(self) -> bool:
+        """等待回合"""
+        time.sleep(2.0)
+        return True
+    
+    def _get_coords(self, button_name: str) -> tuple:
+        """获取按钮坐标"""
+        resolution_coords = self.button_coords.get(self.current_resolution, {})
+        return resolution_coords.get(button_name, (960, 540))
+    
+    def _tap(self, coords: tuple) -> bool:
+        """
+        执行点击。
+        
+        支持三种后端：
+        - adb: shell input tap
+        - accessibility: 无障碍点击
+        -模拟: 仅日志
+        """
+        x, y = coords
+        
+        # 点击间隔控制
+        elapsed = time.time() - self.last_action_time
+        if elapsed < self.click_delay:
+            time.sleep(self.click_delay - elapsed)
+        
+        try:
+            if self.backend == "adb":
+                return self._adb_tap(x, y)
+            elif self.backend == "accessibility":
+                return self._accessibility_tap(x, y)
+            else:  # simulate
+                logger.info(f"[模拟点击] ({x}, {y})")
+                time.sleep(self.click_delay)
+                self.last_action_time = time.time()
+                return True
+                
+        except Exception as e:
+            logger.error(f"点击失败 ({x}, {y}): {e}")
+            return False
+    
+    def _adb_tap(self, x: int, y: int) -> bool:
+        """通过ADB执行点击"""
+        cmd = ["adb"]
+        if self.device_id:
+            cmd.extend(["-s", self.device_id])
+        cmd.extend(["shell", "input", "tap", str(x), str(y)])
+        
+        for attempt in range(self.max_retries):
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    self.last_action_time = time.time()
+                    return True
+                logger.warning(f"ADB点击重试 {attempt + 1}/{self.max_retries}")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"ADB超时 {attempt + 1}/{self.max_retries}")
+        
+        return False
+    
+    def _accessibility_tap(self, x: int, y: int) -> bool:
+        """通过无障碍服务点击"""
+        # 实际实现通过Android Accessibility API
+        logger.info(f"[无障碍点击] ({x}, {y})")
+        self.last_action_time = time.time()
+        return True
+    
+    def screenshot(self, save_path: str) -> Optional[str]:
+        """截图"""
+        try:
+            if self.backend == "adb":
+                cmd = ["adb"]
+                if self.device_id:
+                    cmd.extend(["-s", self.device_id])
+                cmd.extend(["exec-out", "screencap", "-p"])
+                
+                result = subprocess.run(cmd, capture_output=True, timeout=10)
+                if result.returncode == 0:
+                    with open(save_path, "wb") as f:
+                        f.write(result.stdout)
+                    return save_path
+        except Exception as e:
+            logger.error(f"截图失败: {e}")
+        
+        return None
+    
+    def wait_for_animation(self, seconds: float = 1.5):
+        """等待动画播放"""
+        time.sleep(seconds)
+
+
+class ADBController:
+    """
+    ADB控制器 - 管理手机连接。
+    
+    功能：
+    - 连接设备
+    - 截图
+    - 点击
+    - 滑动
+    - 输入文本
+    """
+    
+    def __init__(self, device_id: Optional[str] = None, host: Optional[str] = None, port: int = 5555):
+        self.device_id = device_id
+        self.host = host
+        self.port = port
+    
+    def connect(self) -> bool:
+        """连接设备"""
+        if self.host:
+            try:
+                result = subprocess.run(
+                    ["adb", "connect", f"{self.host}:{self.port}"],
+                    capture_output=True, text=True, timeout=10
+                )
+                return result.returncode == 0
+            except Exception as e:
+                logger.error(f"ADB连接失败: {e}")
+                return False
+        return self.device_id is not None
+    
+    def is_connected(self) -> bool:
+        """检查设备是否连接"""
+        try:
+            cmd = ["adb", "devices"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            return self.device_id in result.stdout if self.device_id else "device" in result.stdout
+        except:
+            return False

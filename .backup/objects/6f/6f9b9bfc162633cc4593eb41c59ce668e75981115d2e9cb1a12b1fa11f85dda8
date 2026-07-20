@@ -1,0 +1,202 @@
+package com.luoking.agent
+
+import android.util.Log
+import com.luoking.agent.models.SessionState
+import kotlinx.coroutines.*
+import okhttp3.*
+import org.json.JSONObject
+import java.util.concurrent.TimeUnit
+
+/**
+ * WebSocket 客户端 - 只管和云端收发 JSON
+ *
+ * 职责单一：
+ * 1. 维持连接（心跳 + 自动重连）
+ * 2. 发送截图
+ * 3. 接收动作指令
+ * 4. 上报执行结果
+ *
+ * 生命周期：
+ *   connect → onOpen → 首次心跳 → 收到 heartbeat_ack(session_id 到手)
+ *   → 开始截图循环 → upload(session_id) → action → action_result
+ *
+ * 关键规则：
+ *   - 在拿到 heartbeat_ack 之前，不发送任何 upload
+ *   - 心跳始终携带 device_id，session_id 拿到后也带上
+ *   - 重连时 session_id 重置，重新走首次握手
+ */
+class WebSocketClient(
+    private val serverUrl: String,
+    private val onAction: (JSONObject) -> Unit,
+    private val onConnected: () -> Unit,
+    private val onDisconnected: () -> Unit
+) {
+    companion object {
+        private const val TAG = "WSClient"
+        private const val HEARTBEAT_INTERVAL = 5000L
+        private const val RECONNECT_DELAY = 3000L
+        private const val MAX_RECONNECT_DELAY = 30000L
+    }
+
+    private var ws: WebSocket? = null
+    private var isConnected = false
+    private var sessionId: String? = null  // 首次 heartbeat_ack 后获得
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var heartbeatJob: Job? = null
+    private var reconnectAttempts = 0
+
+    private val client = OkHttpClient.Builder()
+        .pingInterval(10, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .build()
+
+    // ── 连接管理 ──
+
+    fun connect() {
+        sessionId = null  // 重连重置 session
+        val request = Request.Builder().url(serverUrl).build()
+
+        ws = client.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(ws: WebSocket, response: Response) {
+                isConnected = true
+                SessionState.isConnected = true
+                reconnectAttempts = 0
+                Log.d(TAG, "WebSocket 已连接: $serverUrl")
+                // 首次心跳，不带 session_id
+                sendHeartbeat()
+            }
+
+            override fun onMessage(ws: WebSocket, text: String) {
+                try {
+                    val json = JSONObject(text)
+                    when (json.optString("type", "")) {
+                        "heartbeat_ack" -> {
+                            // session_id 到手！首次握手完成
+                            val sid = json.optString("session_id", "")
+                            if (sid.isNotEmpty()) {
+                                sessionId = sid
+                                SessionState.sessionId = sid
+                                Log.d(TAG, "session_id 已分配: $sid")
+                                // 通知外部：可以开始截图了
+                                onConnected()
+                                startHeartbeat()
+                            }
+                        }
+                        "action" -> {
+                            Log.d(TAG, "收到动作: ${json.optString("action_type")}")
+                            SessionState.totalActions++
+                            onAction(json)
+                        }
+                        "error" -> {
+                            Log.e(TAG, "服务器错误: [${json.optString("code")}] ${json.optString("message")}")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "消息解析失败", e)
+                }
+            }
+
+            override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+                Log.d(TAG, "连接关闭: $reason (code=$code)")
+                cleanup()
+                onDisconnected()
+                scheduleReconnect()
+            }
+
+            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+                Log.e(TAG, "连接失败: ${t.message}")
+                cleanup()
+                onDisconnected()
+                scheduleReconnect()
+            }
+        })
+    }
+
+    fun disconnect() {
+        cleanup()
+        ws?.close(1000, "用户断开")
+        Log.d(TAG, "用户主动断开")
+    }
+
+    private fun cleanup() {
+        heartbeatJob?.cancel()
+        isConnected = false
+        SessionState.isConnected = false
+        sessionId = null
+    }
+
+    // ── 发送 ──
+
+    fun sendHeartbeat() {
+        val json = JSONObject().apply {
+            put("type", "heartbeat")
+            put("device_id", SessionState.deviceId)
+            put("phase", SessionState.phase)
+            put("battery", 0)
+            put("ts", System.currentTimeMillis() / 1000)
+            // 如果已经拿到 session_id，带上
+            sessionId?.let { put("session_id", it) }
+        }
+        send(json.toString())
+    }
+
+    /**
+     * 上传截图。
+     * 必须在 session_id 到手后调用。
+     * 如果 session_id 为空，丢弃本次请求并记录警告。
+     */
+    fun sendScreenshot(base64: String) {
+        val sid = sessionId ?: run {
+            Log.w(TAG, "session_id 未就绪，丢弃截图上传")
+            return
+        }
+        send(JSONObject().apply {
+            put("type", "upload")
+            put("device_id", SessionState.deviceId)
+            put("session_id", sid)
+            put("image", base64)
+            put("ts", System.currentTimeMillis() / 1000)
+        }.toString())
+    }
+
+    fun sendActionResult(success: Boolean) {
+        val sid = sessionId ?: return
+        send(JSONObject().apply {
+            put("type", "action_result")
+            put("device_id", SessionState.deviceId)
+            put("session_id", sid)
+            put("success", success)
+            put("ts", System.currentTimeMillis() / 1000)
+        }.toString())
+    }
+
+    private fun send(message: String) {
+        ws?.send(message)
+    }
+
+    // ── 内部 ──
+
+    private fun startHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = scope.launch {
+            while (isActive) {
+                delay(HEARTBEAT_INTERVAL)
+                if (isConnected) sendHeartbeat()
+            }
+        }
+    }
+
+    private fun scheduleReconnect() {
+        scope.launch {
+            reconnectAttempts++
+            val delay = minOf(
+                RECONNECT_DELAY * (1 shl (reconnectAttempts - 1)),
+                MAX_RECONNECT_DELAY
+            )
+            Log.d(TAG, "${delay}ms 后重连 (第${reconnectAttempts}次)")
+            delay(delay)
+            connect()
+        }
+    }
+}

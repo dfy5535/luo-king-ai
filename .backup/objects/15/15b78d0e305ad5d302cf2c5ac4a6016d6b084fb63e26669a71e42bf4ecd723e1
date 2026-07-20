@@ -1,0 +1,36 @@
+# Node
+node_modules/
+
+# Android
+luo_king_client/.gradle/
+luo_king_client/build/
+luo_king_client/app/build/
+luo_king_client/local.properties
+luo_king_client/gradle/wrapper/gradle-wrapper.jar
+
+# Python
+luo_king_server/__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+
+# Data
+luo_king_server/data/battles/
+luo_king_server/data/memory/
+
+# Operit backup
+.backup/
+
+# Logs
+*.log

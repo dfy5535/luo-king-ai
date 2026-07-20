@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">洛克王国AI助手</string>
+    <string name="accessibility_description">洛克王国AI助手的无障碍服务，用于截图和执行点击操作</string>
+</resources>

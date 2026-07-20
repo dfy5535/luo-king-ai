@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+luo_king_server - 视觉驱动的游戏智能体（云端版）
+===================================================
+设计者：Operator
+实现者：KIRA
+
+架构：
+  ┌────────────── 云服务器 ──────────────┐
+  │  SenseNova Vision → Memory →        │
+  │  Battle Engine → Strategy → Rule    │
+  │  WebSocket API + 监控后台            │
+  └──────────────┬───────────────────────┘
+                 │ WebSocket
+        ┌────────┴────────┐
+        │  Android APK    │
+        │  截图→上传→点击 │
+        └─────────────────┘
+
+启动方式：
+  python main.py server        # 启动云服务器
+  python main.py client        # 启动手机终端
+  python main.py status        # 查看服务器状态
+"""
+
+import sys
+import logging
+
+
+def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    
+    if len(sys.argv) < 2:
+        print("使用方式:")
+        print("  python main.py server        # 启动WebSocket云服务器")
+        print("  python main.py client        # 启动手机终端")
+        print("  python main.py status        # 查看服务器状态")
+        return
+    
+    cmd = sys.argv[1]
+    
+    if cmd == "server":
+        from luo_king_server.server.gateway import run_server
+        import asyncio
+        asyncio.run(run_server())
+    
+    elif cmd == "client":
+        from luo_king_client.agent import run_client
+        import asyncio
+        device_id = sys.argv[2] if len(sys.argv) > 2 else "phone_1"
+        server = sys.argv[3] if len(sys.argv) > 3 else "ws://localhost:8765"
+        asyncio.run(run_client(device_id, server))
+    
+    elif cmd == "status":
+        import requests
+        port = sys.argv[2] if len(sys.argv) > 2 else "8766"
+        try:
+            r = requests.get(f"http://localhost:{port}/status", timeout=5)
+            print(r.json())
+        except Exception as e:
+            print(f"无法连接服务器: {e}")
+    
+    else:
+        print(f"未知命令: {cmd}")
+
+
+if __name__ == "__main__":
+    main()

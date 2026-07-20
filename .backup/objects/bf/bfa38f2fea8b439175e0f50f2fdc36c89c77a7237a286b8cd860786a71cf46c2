@@ -1,0 +1,10 @@
+package com.luoking.agent
+
+import android.app.Application
+
+class MainApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        // 应用级初始化——不需要额外逻辑
+    }
+}

@@ -1,0 +1,272 @@
+"""
+luo_king_agent/vision/parser.py
+================================
+Operator的要求：
+  "视觉系统不是给AI看的。"
+  "视觉系统只是：把图片翻译成游戏状态。"
+  "图片不是输入。状态才是输入。"
+
+这个模块负责：
+  截图 → OCR → 结构解析 → BattleState
+  输出是结构化数据，不是图片。
+"""
+
+from __future__ import annotations
+from typing import Optional, List, Dict, Any, Tuple
+import logging
+import re
+import time
+from dataclasses import dataclass
+
+from ..core.models import (
+    BattleState, PetState, SkillState, PetType, WeatherType,
+    StatusCondition, BuffType, GamePhase, BattleActionType,
+    ScreenCoordinate
+)
+
+logger = logging.getLogger(__name__)
+
+
+class VisionParser:
+    """
+    视觉解析器。
+    
+    职责：接收截图 → 输出BattleState。
+    
+    设计原则：
+    - 不依赖任何特定OCR引擎（可插拔：PaddleOCR / EasyOCR / GPT-4V）
+    - 输出永远是一个完整的BattleState（即使解析失败，也有默认值）
+    - 解析置信度必须返回，AI可以据此决定是否信任
+    """
+    
+    def __init__(self, ocr_engine: str = "paddle"):
+        self.ocr_engine = ocr_engine
+        self._ocr = None  # 懒加载
+        
+        # 屏幕布局模板（根据分辨率调整）
+        self.layout = {
+            "1920x1080": {
+                "hp_bar_my": (200, 850, 400, 30),
+                "hp_bar_enemy": (1300, 100, 400, 30),
+                "skill_buttons": [
+                    (100, 950, 300, 80),
+                    (500, 950, 300, 80),
+                    (100, 1050, 300, 80),
+                    (500, 1050, 300, 80),
+                ],
+                "pet_swap_buttons": [
+                    (900, 950, 200, 60),
+                    (1200, 950, 200, 60),
+                    (1500, 950, 200, 60),
+                ],
+                "battle_log": (1300, 500, 500, 300),
+            }
+        }
+    
+    def parse_screenshot(self, image_path: str, resolution: str = "1920x1080") -> BattleState:
+        """
+        解析截图 → BattleState。
+        
+        Args:
+            image_path: 截图路径
+            resolution: 屏幕分辨率
+            
+        Returns:
+            BattleState: 结构化战斗状态
+        """
+        state = BattleState()
+        state.screenshot_timestamp = time.time()
+        
+        try:
+            # 1. OCR提取文本
+            raw_texts = self._ocr_image(image_path)
+            state.raw_text_detected = raw_texts
+            
+            # 2. 识别游戏阶段
+            state.phase = self._detect_phase(raw_texts)
+            
+            # 3. 如果是战斗阶段，解析战斗状态
+            if state.phase == GamePhase.战斗:
+                state = self._parse_battle_state(raw_texts, state)
+            
+            # 4. 解析置信度
+            state.parse_confidence = self._calculate_confidence(state)
+            
+        except Exception as e:
+            logger.error(f"视觉解析失败: {e}", exc_info=True)
+            state.parse_confidence = 0.0
+        
+        return state
+    
+    def _ocr_image(self, image_path: str) -> List[str]:
+        """
+        执行OCR。
+        可插拔设计：支持多种OCR引擎。
+        """
+        # 实际实现会调用OCR引擎
+        # 这里返回示例数据
+        return [
+            "烈火战神", "HP 156/200", "Lv.100",
+            "烈焰冲锋 PP 8/10", "火焰护盾 PP 12/15",
+            "速度强化 PP 15/20", "热力爆燃 PP 5/5",
+            "冰龙王", "HP 180/220",
+            "晴天",
+            "技能", "宠物", "道具", "逃跑",
+        ]
+    
+    def _detect_phase(self, texts: List[str]) -> GamePhase:
+        """根据OCR文本检测游戏阶段"""
+        text_combined = " ".join(texts).lower()
+        
+        if any(k in text_combined for k in ["登录", "账号", "密码", "login"]):
+            return GamePhase.登录
+        if any(k in text_combined for k in ["匹配中", "寻找对手", "匹配"]):
+            return GamePhase.匹配中
+        if any(k in text_combined for k in ["选宠", "选择宠物", "出战"]):
+            return GamePhase.选宠
+        if any(k in text_combined for k in ["技能", "hp", "pp", "回合"]):
+            return GamePhase.战斗
+        if any(k in text_combined for k in ["胜利", "失败", "结算", "经验"]):
+            return GamePhase.结算
+        if any(k in text_combined for k in ["大厅", "主界面", "首页"]):
+            return GamePhase.大厅
+        
+        return GamePhase.未知
+    
+    def _parse_battle_state(self, texts: List[str], state: BattleState) -> BattleState:
+        """从OCR文本解析战斗状态"""
+        
+        # 解析我方出战宠物
+        my_pet = self._parse_pet(texts, side="my")
+        if my_pet:
+            my_pet.is_active = True
+            state.my_active = my_pet
+            state.my_pets.append(my_pet)
+        
+        # 解析敌方宠物
+        enemy_pet = self._parse_pet(texts, side="enemy")
+        if enemy_pet:
+            enemy_pet.is_active = True
+            state.enemy_pet = enemy_pet
+        
+        # 解析天气
+        state.weather = self._parse_weather(texts)
+        
+        # 判断回合
+        state.is_my_turn = self._is_my_turn(texts)
+        
+        # 解析回合数
+        state.turn_number = self._parse_turn_number(texts)
+        
+        return state
+    
+    def _parse_pet(self, texts: List[str], side: str = "my") -> Optional[PetState]:
+        """从OCR文本解析一只宠物"""
+        pet = PetState(name="未知")
+        
+        for text in texts:
+            # 宠物名
+            if text in ["烈火战神", "冰龙王", "圣光迪莫", "水灵", "草王"]:
+                pet.name = text
+            
+            # HP
+            hp_match = re.search(r'HP\s*(\d+)/(\d+)', text)
+            if hp_match:
+                pet.hp_current = int(hp_match.group(1))
+                pet.hp_max = int(hp_match.group(2))
+            
+            # 等级
+            lv_match = re.search(r'Lv\.?\s*(\d+)', text, re.IGNORECASE)
+            if lv_match:
+                pet.level = int(lv_match.group(1))
+            
+            # 技能
+            skill_match = re.search(r'(.+?)\s+PP\s+(\d+)/(\d+)', text)
+            if skill_match:
+                pet.skills.append(SkillState(
+                    name=skill_match.group(1).strip(),
+                    pp_current=int(skill_match.group(2)),
+                    pp_max=int(skill_match.group(3)),
+                ))
+        
+        # 自动计算总PP
+        pet.pp_total = sum(s.pp_current for s in pet.skills)
+        pet.pp_max = sum(s.pp_max for s in pet.skills)
+        
+        return pet if pet.name != "未知" else None
+    
+    def _parse_weather(self, texts: List[str]) -> WeatherType:
+        """解析天气"""
+        weather_map = {
+            "晴天": WeatherType.晴天,
+            "雨天": WeatherType.雨天,
+            "暴风雪": WeatherType.暴风雪,
+            "沙暴": WeatherType.沙暴,
+            "迷雾": WeatherType.迷雾,
+        }
+        for text in texts:
+            for key, val in weather_map.items():
+                if key in text:
+                    return val
+        return WeatherType.无
+    
+    def _is_my_turn(self, texts: List[str]) -> bool:
+        """判断是否我方回合"""
+        # 实际逻辑：检测技能按钮是否可点击、是否有"请选择"提示等
+        for text in texts:
+            if "请选择" in text or "技能" in text:
+                return True
+        return False
+    
+    def _parse_turn_number(self, texts: List[str]) -> int:
+        """解析回合数"""
+        for text in texts:
+            match = re.search(r'第\s*(\d+)\s*回合', text)
+            if match:
+                return int(match.group(1))
+        return 0
+    
+    def _calculate_confidence(self, state: BattleState) -> float:
+        """计算解析置信度"""
+        score = 0.0
+        if state.my_active:
+            score += 0.3
+            if state.my_active.hp_max > 0:
+                score += 0.2
+            if state.my_active.skills:
+                score += 0.2
+        if state.enemy_pet:
+            score += 0.2
+        return min(1.0, score)
+
+
+class ScreenRegionDetector:
+    """
+    屏幕区域检测器。
+    负责识别按钮位置、UI元素坐标。
+    输出ScreenCoordinate，供执行层使用。
+    """
+    
+    def __init__(self, resolution: str = "1920x1080"):
+        self.resolution = resolution
+        self.templates: Dict[str, ScreenCoordinate] = {}
+    
+    def detect_button(self, image_path: str, button_label: str) -> Optional[ScreenCoordinate]:
+        """
+        检测按钮位置。
+        使用模板匹配或YOLO。
+        """
+        # 实际实现使用OpenCV模板匹配
+        # 这里返回示例坐标
+        coords = {
+            "技能1": ScreenCoordinate(100, 950, 300, 80, "技能1"),
+            "技能2": ScreenCoordinate(500, 950, 300, 80, "技能2"),
+            "技能3": ScreenCoordinate(100, 1050, 300, 80, "技能3"),
+            "技能4": ScreenCoordinate(500, 1050, 300, 80, "技能4"),
+            "换宠1": ScreenCoordinate(900, 950, 200, 60, "换宠1"),
+            "换宠2": ScreenCoordinate(1200, 950, 200, 60, "换宠2"),
+            "换宠3": ScreenCoordinate(1500, 950, 200, 60, "换宠3"),
+            "确认": ScreenCoordinate(800, 1000, 300, 80, "确认"),
+            "开始匹配": ScreenCoordinate(800, 600, 300, 80, "开始匹配"),
+        }
+        return coords.get(button_label)

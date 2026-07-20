@@ -1,0 +1,27 @@
+package com.luoking.agent
+
+import android.app.Activity
+import android.os.Bundle
+import android.widget.LinearLayout
+import android.widget.TextView
+
+class MainActivity : Activity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 48, 48, 48)
+        }
+        val title = TextView(this).apply {
+            text = "⚔ 洛克王国 AI 助手"
+            textSize = 22f
+        }
+        val status = TextView(this).apply {
+            text = "启动成功！"
+            textSize = 16f
+        }
+        layout.addView(title)
+        layout.addView(status)
+        setContentView(layout)
+    }
+}

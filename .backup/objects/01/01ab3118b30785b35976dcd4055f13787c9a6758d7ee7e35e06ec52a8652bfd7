@@ -1,0 +1,289 @@
+"""
+luo_king_client/agent.py
+=========================
+Android APK 模拟器——手机端只做四件事：
+1. 截图
+2. 上传截图（Base64 → WebSocket）
+3. 接收服务器返回的动作
+4. 执行点击/滑动
+
+这里面没有 Battle Engine，没有 LLM，没有 OCR。
+只有截图、上传、接收、点击。
+"""
+
+from __future__ import annotations
+import asyncio
+import json
+import logging
+import time
+import base64
+import os
+from typing import Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
+
+try:
+    import websockets
+except ImportError:
+    websockets = None
+
+
+class MobileAgent:
+    """
+    手机终端——纯执行器。
+    
+    只做四件事：
+    1. screenshot() → 截图
+    2. upload() → 上传截图
+    3. receive() → 接收动作
+    4. execute() → 执行点击
+    
+    没有 AI，没有引擎，没有记忆。
+    """
+    
+    def __init__(self, device_id: str, server_url: str = "ws://localhost:8765"):
+        self.device_id = device_id
+        self.server_url = server_url
+        self.websocket = None
+        self.session_id: Optional[str] = None
+        self.running = False
+        self.current_phase = "unknown"
+        
+        # 截图后端
+        self.screenshot_backend = "adb"  # adb / accessibility
+    
+    # ──────────────────────────────────────────────────────────────
+    # 生命周期
+    # ──────────────────────────────────────────────────────────────
+    
+    async def connect(self):
+        """连接服务器"""
+        if websockets is None:
+            logger.error("websockets 未安装")
+            return False
+        
+        try:
+            self.websocket = await websockets.connect(self.server_url)
+            logger.info(f"已连接服务器: {self.server_url}")
+            
+            # 发送心跳，注册设备
+            await self._send({
+                "type": "heartbeat",
+                "device_id": self.device_id,
+                "phase": self.current_phase,
+            })
+            
+            # 等待响应
+            response = await self.websocket.recv()
+            data = json.loads(response)
+            if data.get("type") == "heartbeat_ack":
+                self.session_id = data.get("session_id")
+                logger.info(f"注册成功: session_id={self.session_id}")
+                return True
+            
+            return False
+        except Exception as e:
+            logger.error(f"连接失败: {e}")
+            return False
+    
+    async def disconnect(self):
+        """断开连接"""
+        self.running = False
+        if self.websocket:
+            await self.websocket.close()
+            self.websocket = None
+        logger.info("已断开连接")
+    
+    # ──────────────────────────────────────────────────────────────
+    # 主循环
+    # ──────────────────────────────────────────────────────────────
+    
+    async def start(self):
+        """启动主循环"""
+        if not await self.connect():
+            logger.error("无法连接服务器")
+            return
+        
+        self.running = True
+        logger.info("=" * 50)
+        logger.info(f"手机终端启动: {self.device_id}")
+        logger.info("=" * 50)
+        
+        while self.running:
+            try:
+                # 1. 截图
+                screenshot_path = self._take_screenshot()
+                if not screenshot_path:
+                    await asyncio.sleep(1)
+                    continue
+                
+                # 2. 上传截图
+                image_base64 = self._image_to_base64(screenshot_path)
+                if not image_base64:
+                    await asyncio.sleep(1)
+                    continue
+                
+                await self._send({
+                    "type": "upload",
+                    "device_id": self.device_id,
+                    "image": image_base64,
+                })
+                
+                # 3. 接收服务器返回的动作
+                response = await self.websocket.recv()
+                action = json.loads(response)
+                
+                # 4. 执行动作
+                if action.get("type") == "action":
+                    await self._execute_action(action)
+                elif action.get("type") == "error":
+                    logger.error(f"服务器错误: {action.get('message')}")
+                    await asyncio.sleep(1)
+                
+            except websockets.ConnectionClosed:
+                logger.warning("连接断开，尝试重连...")
+                if not await self.connect():
+                    break
+            except Exception as e:
+                logger.error(f"主循环错误: {e}")
+                await asyncio.sleep(1)
+    
+    # ──────────────────────────────────────────────────────────────
+    # 截图
+    # ──────────────────────────────────────────────────────────────
+    
+    def _take_screenshot(self) -> Optional[str]:
+        """截图——使用ADB或无障碍服务"""
+        path = f"/tmp/screenshot_{self.device_id}_{int(time.time())}.jpg"
+        
+        try:
+            if self.screenshot_backend == "adb":
+                import subprocess
+                result = subprocess.run(
+                    ["adb", "exec-out", "screencap", "-p"],
+                    capture_output=True, timeout=10
+                )
+                if result.returncode == 0:
+                    with open(path, "wb") as f:
+                        f.write(result.stdout)
+                    return path
+            else:
+                # 无障碍服务截图
+                logger.warning("无障碍截图未实现，使用模拟截图")
+                return None
+        except Exception as e:
+            logger.error(f"截图失败: {e}")
+            return None
+    
+    def _image_to_base64(self, path: str) -> Optional[str]:
+        """图片转Base64"""
+        try:
+            with open(path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+        except Exception as e:
+            logger.error(f"Base64编码失败: {e}")
+            return None
+    
+    # ──────────────────────────────────────────────────────────────
+    # 执行动作
+    # ──────────────────────────────────────────────────────────────
+    
+    async def _execute_action(self, action: Dict):
+        """
+        执行服务器返回的动作。
+        
+        支持的动作类型：
+        - skill: 点击技能按钮
+        - swap: 点击换宠按钮
+        - tap: 点击指定坐标
+        - wait: 等待
+        """
+        action_type = action.get("action_type", "wait")
+        delay_ms = action.get("delay_ms", 500)
+        skill_index = action.get("skill_index")
+        coordinate = action.get("coordinate")
+        
+        logger.info(f"执行: {action_type} (index={skill_index}, coord={coordinate}) delay={delay_ms}ms")
+        logger.debug(f"理由: {action.get('reasoning', '')}")
+        
+        # 等待指定延迟
+        if delay_ms > 0:
+            await asyncio.sleep(delay_ms / 1000)
+        
+        # 执行点击
+        if action_type == "skill" and skill_index:
+            self._click_skill(skill_index)
+        elif action_type == "swap":
+            self._click_swap()
+        elif action_type == "tap" and coordinate:
+            self._tap(coordinate[0], coordinate[1])
+        elif action_type == "wait":
+            pass  # 已经sleep了
+        else:
+            logger.warning(f"未知动作类型: {action_type}")
+        
+        # 发送执行结果
+        await self._send({
+            "type": "action_result",
+            "device_id": self.device_id,
+            "success": True,
+        })
+    
+    def _click_skill(self, index: int):
+        """点击技能按钮（1-based）"""
+        # 技能按钮坐标映射（1920x1080分辨率）
+        skill_coords = {
+            1: (250, 1000), 2: (650, 1000),
+            3: (250, 1100), 4: (650, 1100),
+        }
+        coord = skill_coords.get(index)
+        if coord:
+            self._tap(coord[0], coord[1])
+    
+    def _click_swap(self):
+        """点击换宠"""
+        self._tap(1000, 1000)
+    
+    def _tap(self, x: int, y: int):
+        """执行点击"""
+        try:
+            if self.screenshot_backend == "adb":
+                import subprocess
+                subprocess.run(
+                    ["adb", "shell", "input", "tap", str(x), str(y)],
+                    capture_output=True, timeout=5
+                )
+            else:
+                logger.info(f"[模拟点击] ({x}, {y})")
+        except Exception as e:
+            logger.error(f"点击失败: {e}")
+    
+    # ──────────────────────────────────────────────────────────────
+    # 辅助
+    # ──────────────────────────────────────────────────────────────
+    
+    async def _send(self, data: Dict):
+        """发送消息"""
+        if self.websocket:
+            try:
+                await self.websocket.send(json.dumps(data, ensure_ascii=False))
+            except Exception as e:
+                logger.error(f"发送失败: {e}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 启动入口
+# ──────────────────────────────────────────────────────────────────────
+
+async def run_client(device_id: str = "phone_1", server: str = "ws://localhost:8765"):
+    """启动手机终端"""
+    client = MobileAgent(device_id=device_id, server_url=server)
+    await client.start()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    import sys
+    device_id = sys.argv[1] if len(sys.argv) > 1 else "phone_1"
+    server = sys.argv[2] if len(sys.argv) > 2 else "ws://localhost:8765"
+    asyncio.run(run_client(device_id, server))

@@ -1,0 +1,227 @@
+"""
+luo_king_agent/agents/strategy_agent.py
+========================================
+Operator的要求：
+  "策略Agent：真正思考。现在应该怎么赢？"
+  "AI收到的是：技能1 评分82，技能2 评分75，你认为应该怎么选？"
+  "AI压力一下减少很多。"
+
+这个Agent才是真正调用LLM的地方。
+但它只负责"博弈"，不负责"算数"。
+Battle Engine已经把数据准备好了，它只需要做选择题。
+"""
+
+from __future__ import annotations
+from typing import Optional, List, Dict, Any, Callable
+import logging
+import json
+import os
+
+from ..core.models import (
+    BattleState, BattleAction, BattleActionType,
+    PetState, GamePhase
+)
+from ..engine.battle_engine import BattleEngine, BattleRecommendation
+from .rule_agent import RuleAgent
+
+logger = logging.getLogger(__name__)
+
+
+class StrategyAgent:
+    """
+    策略Agent - 真正的"AI决策者"。
+    
+    职责：
+    - 接收Battle Engine的分析结果
+    - 接收当前战斗状态
+    - 调用LLM做最终的博弈决策
+    - 输出BattleAction
+    
+    设计原则：
+    - LLM只做"选择题"，不做"计算题"
+    - 所有确定性计算已经由Battle Engine完成
+    - LLM只需要在2-4个选项中选一个
+    - 如果Battle Engine已经确定（斩杀线等），直接执行
+    """
+    
+    def __init__(self, llm_client: Optional[Any] = None, model: str = "gemini-2.5-flash"):
+        self.llm = llm_client
+        self.model = model
+        self.rule_agent = RuleAgent()
+        self.conversation_history: List[Dict] = []
+        self.max_history = 10  # 保留最近10轮对话
+        
+    def decide(self, state: BattleState, recommendation: BattleRecommendation) -> BattleAction:
+        """
+        做出决策。
+        
+        决策流程：
+        1. 如果Battle Engine有确定性建议，直接执行
+        2. 否则，构造Prompt交给LLM
+        3. LLM输出 → 规则验证 → 执行
+        """
+        # 1. 规则验证：先过滤非法动作
+        valid_actions = self.rule_agent.validate_all_actions(state)
+        if not valid_actions:
+            logger.warning("没有合法动作！")
+            return BattleAction(BattleActionType.等待, reasoning="没有合法动作")
+        
+        # 2. 如果引擎有确定性建议且合法
+        if recommendation.suggested_action:
+            # 验证引擎建议是否合法
+            result = self.rule_agent.validate(recommendation.suggested_action, state)
+            if result.valid:
+                logger.info(f"引擎确定性决策: {recommendation.suggested_action.target}")
+                return recommendation.suggested_action
+        
+        # 3. 如果引擎推荐且只有一个推荐技能
+        recommended = [s for s in recommendation.skill_scores if s.is_recommended]
+        if len(recommended) == 1 and len(valid_actions) <= 2:
+            action = BattleAction(
+                action_type=BattleActionType.技能,
+                target=recommended[0].skill_name,
+                confidence=0.85,
+                reasoning=f"引擎唯一推荐: {recommended[0].reasoning}"
+            )
+            result = self.rule_agent.validate(action, state)
+            if result.valid:
+                return action
+        
+        # 4. 需要LLM决策
+        return self._llm_decide(state, recommendation, valid_actions)
+    
+    def _llm_decide(self, state: BattleState, rec: BattleRecommendation, 
+                    valid_actions: List[BattleAction]) -> BattleAction:
+        """
+        调用LLM做最终决策。
+        
+        Prompt设计原则（Operator的要求）：
+        - 不给AI看图片
+        - 不给AI做计算
+        - 只给AI做博弈选择
+        """
+        prompt = self._build_prompt(state, rec, valid_actions)
+        
+        if self.llm:
+            try:
+                response = self.llm.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": self._system_prompt()},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.3,  # 低温度，减少随机性
+                    max_tokens=500,
+                    response_format={"type": "json_object"},
+                )
+                result = json.loads(response.choices[0].message.content)
+                action = self._parse_llm_response(result, state)
+                
+                # 记录对话历史
+                self._record_history(state, rec, action)
+                
+                return action
+                
+            except Exception as e:
+                logger.error(f"LLM决策失败: {e}")
+                # fallback: 选引擎评分最高的
+                return self._fallback_decision(rec, valid_actions)
+        else:
+            # 无LLM客户端，使用引擎评分
+            return self._fallback_decision(rec, valid_actions)
+    
+    def _system_prompt(self) -> str:
+        """系统提示词 - 只定义AI的角色和输出格式"""
+        return """你是洛克王国对战AI，你的任务是选择最佳战斗动作。
+
+设计原则：
+1. 你不需要计算属性克制——Battle Engine已经算好了
+2. 你不需要看图片——状态已经转成文本了
+3. 你只需要做博弈选择
+
+输出严格JSON格式：
+{
+  "action_type": "skill" | "swap",
+  "target": "技能名" | "宠物名",
+  "reasoning": "简短决策理由",
+  "confidence": 0.0-1.0
+}"""
+    
+    def _build_prompt(self, state: BattleState, rec: BattleRecommendation,
+                      valid_actions: List[BattleAction]) -> str:
+        """构建决策Prompt - 只给AI做选择题"""
+        lines = []
+        lines.append("=== 当前战斗状态 ===")
+        lines.append(state.to_prompt_context())
+        lines.append("")
+        lines.append(rec.to_prompt_context())
+        lines.append("")
+        
+        lines.append("=== 合法动作列表 ===")
+        for i, action in enumerate(valid_actions, 1):
+            if action.action_type == BattleActionType.技能:
+                # 找到对应的引擎评分
+                score_info = ""
+                for s in rec.skill_scores:
+                    if s.skill_name == action.target:
+                        score_info = f" [引擎评分: {s.score:.0f}/100, 伤害预估: {s.damage_estimate:.0f}]"
+                        break
+                lines.append(f"{i}. 使用技能: {action.target}{score_info}")
+            elif action.action_type == BattleActionType.换宠:
+                lines.append(f"{i}. 换宠: {action.target}")
+        
+        lines.append("")
+        lines.append("请从以上合法动作中选择一个最佳方案。")
+        lines.append("输出JSON格式。")
+        
+        return "\n".join(lines)
+    
+    def _parse_llm_response(self, result: Dict, state: BattleState) -> BattleAction:
+        """解析LLM的JSON输出为BattleAction"""
+        action_type = result.get("action_type", "skill")
+        target = result.get("target", "")
+        reasoning = result.get("reasoning", "")
+        confidence = result.get("confidence", 0.5)
+        
+        type_map = {
+            "skill": BattleActionType.技能,
+            "swap": BattleActionType.换宠,
+            "item": BattleActionType.使用道具,
+            "flee": BattleActionType.逃跑,
+        }
+        
+        return BattleAction(
+            action_type=type_map.get(action_type, BattleActionType.技能),
+            target=target,
+            confidence=confidence,
+            reasoning=reasoning
+        )
+    
+    def _fallback_decision(self, rec: BattleRecommendation,
+                          valid_actions: List[BattleAction]) -> BattleAction:
+        """降级决策：使用引擎评分最高的合法动作"""
+        if rec.skill_scores:
+            best = rec.skill_scores[0]
+            return BattleAction(
+                action_type=BattleActionType.技能,
+                target=best.skill_name,
+                confidence=best.score / 100,
+                reasoning=f"降级决策: {best.reasoning}"
+            )
+        if valid_actions:
+            return valid_actions[0]
+        return BattleAction(BattleActionType.等待, reasoning="无可用动作")
+    
+    def _record_history(self, state: BattleState, rec: BattleRecommendation,
+                        action: BattleAction):
+        """记录决策历史"""
+        self.conversation_history.append({
+            "turn": state.turn_number,
+            "state": state.to_prompt_context(),
+            "recommendation": rec.to_prompt_context(),
+            "decision": action.target,
+            "reasoning": action.reasoning,
+        })
+        # 只保留最近N轮
+        if len(self.conversation_history) > self.max_history:
+            self.conversation_history = self.conversation_history[-self.max_history:]

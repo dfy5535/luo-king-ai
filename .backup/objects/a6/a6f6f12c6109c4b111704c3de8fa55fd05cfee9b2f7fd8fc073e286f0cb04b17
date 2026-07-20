@@ -1,0 +1,221 @@
+package com.luoking.agent
+
+import android.content.Intent
+import android.media.projection.MediaProjectionManager
+import android.os.Build
+import android.os.Bundle
+import android.provider.Settings
+import android.widget.Button
+import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import com.luoking.agent.models.SessionState
+
+/**
+ * 主界面 - 只做授权、绑定、入口
+ *
+ * 最小闭环时序：
+ *   启动 → heartbeat(device_id, ts) → heartbeat_ack(session_id)
+ *   → upload(session_id, image, ts) → action → action_result
+ *
+ * 关键规则：
+ *   - heartbeat_ack 之前，禁止 upload / action_result
+ *   - 断线重连后，SessionState.sessionId 立刻清空，必须重新握手
+ */
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var statusText: TextView
+    private lateinit var connectBtn: Button
+    private lateinit var serverAddressInput: android.widget.EditText
+    private lateinit var statsText: TextView
+
+    private var wsClient: WebSocketClient? = null
+    private var actionDispatcher: ActionDispatcher? = null
+    private var isRunning = false
+
+    private val screenCaptureLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK && result.data != null) {
+            startScreenCaptureService(result.resultCode, result.data!!)
+        } else {
+            Toast.makeText(this, "需要屏幕捕获权限", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        statusText = findViewById(R.id.status_text)
+        connectBtn = findViewById(R.id.connect_btn)
+        serverAddressInput = findViewById(R.id.server_address)
+        statsText = findViewById(R.id.stats_text)
+
+        val prefs = getSharedPreferences("luo_king", MODE_PRIVATE)
+        serverAddressInput.setText(prefs.getString("server_url", "ws://193.112.187.72:8765"))
+
+        SessionState.deviceId = "phone_${android.provider.Settings.Secure.getString(
+            contentResolver, Settings.Secure.ANDROID_ID
+        )?.takeLast(6) ?: "unknown"}"
+
+        connectBtn.setOnClickListener {
+            if (isRunning) {
+                stopAll()
+            } else {
+                checkPermissionsAndStart()
+            }
+        }
+
+        updateStatus()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateStatus()
+    }
+
+    // ── 权限检查 ──
+
+    private fun checkPermissionsAndStart() {
+        val serverUrl = serverAddressInput.text.toString().trim()
+        if (serverUrl.isEmpty()) {
+            Toast.makeText(this, "请输入服务器地址", Toast.LENGTH_SHORT).show()
+            return
+        }
+        SessionState.serverUrl = serverUrl
+        getSharedPreferences("luo_king", MODE_PRIVATE).edit()
+            .putString("server_url", serverUrl).apply()
+
+        if (!isAccessibilityServiceEnabled()) {
+            AlertDialog.Builder(this)
+                .setTitle("需要无障碍权限")
+                .setMessage("洛克王国AI助手需要无障碍权限来执行点击操作。")
+                .setPositiveButton("去设置") { _, _ ->
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                }
+                .setNegativeButton("取消", null)
+                .show()
+            return
+        }
+
+        requestScreenCapture()
+    }
+
+    private fun requestScreenCapture() {
+        val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE)
+                as MediaProjectionManager
+        screenCaptureLauncher.launch(projectionManager.createScreenCaptureIntent())
+    }
+
+    private fun isAccessibilityServiceEnabled(): Boolean {
+        val service = "${packageName}/${AccessibilityInputService::class.java.canonicalName}"
+        try {
+            val enabledServices = Settings.Secure.getString(
+                contentResolver,
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            ) ?: return false
+            return enabledServices.split(":").any { it.equals(service, ignoreCase = true) }
+        } catch (e: Exception) {
+            return false
+        }
+    }
+
+    // ── 启动服务 ──
+
+    private fun startScreenCaptureService(resultCode: Int, data: Intent) {
+        val intent = Intent(this, ScreenCaptureService::class.java).apply {
+            putExtra("result_code", resultCode)
+            putExtra("data", data)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+        startWebSocket()
+    }
+
+    private fun startWebSocket() {
+        isRunning = true
+        connectBtn.text = "停止"
+        statusText.text = "🔄 连接中..."
+
+        wsClient = WebSocketClient(
+            serverUrl = SessionState.serverUrl,
+            onAction = { action -> actionDispatcher?.execute(action) },
+            // WebSocket 连接建立（仅 UI 更新）
+            onConnected = {
+                runOnUiThread { statusText.text = "🔄 WebSocket 已连接，等待 session_id..." }
+            },
+            // session_id 到手！可以开始截图
+            onSessionEstablished = {
+                runOnUiThread {
+                    statusText.text = "🟢 会话已建立 (session: ${SessionState.sessionId.takeLast(8)})"
+                    startScreenshotLoop()
+                }
+            },
+            onDisconnected = {
+                runOnUiThread {
+                    statusText.text = "🔴 断开连接"
+                    stopScreenshotLoop()
+                    updateStatus()
+                }
+            }
+        )
+
+        actionDispatcher = ActionDispatcher(wsClient!!)
+        wsClient?.connect()
+    }
+
+    // ── 截图循环 ──
+    // 仅在 onSessionEstablished 后启动
+
+    private val mainHandler = android.os.Handler(mainLooper)
+    private val screenshotRunnable = object : Runnable {
+        override fun run() {
+            if (isRunning) {
+                ScreenCaptureService.requestScreenshot()
+                mainHandler.postDelayed(this, SessionState.screenshotIntervalMs)
+                updateStatus()
+            }
+        }
+    }
+
+    private fun startScreenshotLoop() {
+        mainHandler.removeCallbacks(screenshotRunnable)
+        mainHandler.post(screenshotRunnable)
+    }
+
+    private fun stopScreenshotLoop() {
+        mainHandler.removeCallbacks(screenshotRunnable)
+    }
+
+    private fun stopAll() {
+        isRunning = false
+        stopScreenshotLoop()
+        wsClient?.disconnect()
+        stopService(Intent(this, ScreenCaptureService::class.java))
+        connectBtn.text = "连接"
+        statusText.text = "⏹ 已停止"
+        SessionState.isRunning = false
+        SessionState.sessionId = ""
+    }
+
+    // ── 状态更新 ──
+
+    private fun updateStatus() {
+        val status = StringBuilder()
+        status.append("📱 ${SessionState.deviceId}\n")
+        status.append(if (wsClient?.isSessionEstablished() == true) "🟢 会话已建立" else "🔴 未连接")
+        status.append(" | 阶段: ${SessionState.phase}\n")
+        if (SessionState.sessionId.isNotEmpty()) {
+            status.append("🆔 session: ${SessionState.sessionId.takeLast(8)}\n")
+        }
+        status.append("📸 截图: ${SessionState.totalScreenshots}")
+        status.append(" | 🎯 动作: ${SessionState.totalActions}")
+        statsText.text = status.toString()
+    }
+}
