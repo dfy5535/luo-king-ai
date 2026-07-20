@@ -1,6 +1,7 @@
 package com.luoking.agent.dispatcher
 
 import com.luoking.agent.models.CoordinateManager
+import com.luoking.agent.models.SessionState
 import com.luoking.agent.services.InputService
 import com.luoking.agent.services.WebSocketClient
 import org.json.JSONObject
@@ -21,6 +22,7 @@ object ActionDispatcher {
             try { Thread.sleep(delay) } catch (_: InterruptedException) {}
             var ok = true
             try {
+                SessionState.totalGestures++
                 when (type) {
                     "tap" -> {
                         if (coord != null && coord.length() >= 2)
@@ -38,6 +40,7 @@ object ActionDispatcher {
                     "wait" -> {}
                 }
             } catch (_: Exception) { ok = false }
+            if (ok) SessionState.gestureSuccess++ else SessionState.gestureFail++
             ws.sendActionResult(ok)
         }.start()
     }

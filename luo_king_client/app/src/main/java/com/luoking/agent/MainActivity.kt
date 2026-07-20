@@ -13,26 +13,30 @@ import android.widget.TextView
 import com.luoking.agent.dispatcher.ServiceController
 import com.luoking.agent.managers.ConfigManager
 import com.luoking.agent.managers.PermissionManager
-import com.luoking.agent.models.CoordinateManager
 import com.luoking.agent.models.SessionState
 import com.luoking.agent.services.CaptureService
 import com.luoking.agent.services.InputService
+import com.luoking.agent.services.WebSocketClient
+import org.json.JSONObject
 
 /**
- * 主界面 — 控制台，不包含任何业务逻辑
- * 所有操作委托给 ServiceController / PermissionManager / ConfigManager
+ * 主界面 — 完整诊断面板
+ * 每秒刷新，显示所有内部状态
  */
 class MainActivity : Activity() {
     private lateinit var statusText: TextView
-    private lateinit var diagnosticsText: TextView
+    private lateinit var panelText: TextView
+    private lateinit var logText: TextView
     private lateinit var startBtn: Button
     private lateinit var accessibilityBtn: Button
     private lateinit var captureBtn: Button
+    private lateinit var testConnectBtn: Button
+    private lateinit var testTapBtn: Button
     private val handler = Handler(Looper.getMainLooper())
     private var isRunning = false
 
     private val diagRunnable = object : Runnable {
-        override fun run() { updateDiagnostics(); handler.postDelayed(this, 1000) }
+        override fun run() { updatePanel(); handler.postDelayed(this, 1000) }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -41,19 +45,56 @@ class MainActivity : Activity() {
         SessionState.deviceId = "phone_${Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)?.takeLast(6) ?: "unknown"}"
 
         val scroll = ScrollView(this)
-        val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(32, 32, 32, 32) }
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(24, 24, 24, 24)
+        }
 
-        layout.addView(TextView(this).apply { text = "⚔ 洛克王国 AI 助手"; textSize = 22f; setPadding(0, 0, 0, 4) })
-        layout.addView(TextView(this).apply { text = "手机执行器节点"; textSize = 13f; setPadding(0, 0, 0, 24) })
+        // 标题
+        layout.addView(TextView(this).apply {
+            text = "⚔ 洛克王国 AI 助手"; textSize = 22f; setPadding(0, 0, 0, 4)
+        })
 
-        statusText = TextView(this).apply { text = "就绪"; textSize = 16f; setMinHeight(60); setPadding(0, 0, 0, 16) }
+        // 状态行
+        statusText = TextView(this).apply {
+            text = "就绪"; textSize = 16f; setMinHeight(40); setPadding(0, 0, 0, 16)
+        }
+        layout.addView(statusText)
+
+        // 操作按钮行
+        val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         startBtn = Button(this).apply { text = "🚀 启动"; setOnClickListener { toggleStart() } }
-        accessibilityBtn = Button(this).apply { text = "🔓 无障碍设置"; setOnClickListener { PermissionManager.requestAccessibility(this@MainActivity) } }
-        captureBtn = Button(this).apply { text = "📸 授权截屏"; setOnClickListener { startActivityForResult(PermissionManager.requestScreenCapture(this@MainActivity), CAPTURE_REQ) } }
-        diagnosticsText = TextView(this).apply { text = "等待启动..."; textSize = 13f; setPadding(0, 16, 0, 0) }
+        accessibilityBtn = Button(this).apply { text = "🔓 无障碍"; setOnClickListener {
+            PermissionManager.requestAccessibility(this@MainActivity)
+        } }
+        captureBtn = Button(this).apply { text = "📸 截屏"; setOnClickListener {
+            startActivityForResult(PermissionManager.requestScreenCapture(this@MainActivity), CAPTURE_REQ)
+        } }
+        btnRow.addView(startBtn); btnRow.addView(accessibilityBtn); btnRow.addView(captureBtn)
+        layout.addView(btnRow)
 
-        layout.addView(statusText); layout.addView(startBtn)
-        layout.addView(accessibilityBtn); layout.addView(captureBtn); layout.addView(diagnosticsText)
+        // 测试按钮行
+        val testRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 8, 0, 0) }
+        testConnectBtn = Button(this).apply { text = "🔍 测试连接"; setOnClickListener { testConnection() } }
+        testTapBtn = Button(this).apply { text = "👆 测试点击"; setOnClickListener { testTap() } }
+        testRow.addView(testConnectBtn); testRow.addView(testTapBtn)
+        layout.addView(testRow)
+
+        // 诊断面板
+        panelText = TextView(this).apply {
+            textSize = 12f; setPadding(0, 12, 0, 0)
+            setMinHeight(200)
+        }
+        layout.addView(panelText)
+
+        // 日志窗口
+        layout.addView(TextView(this).apply {
+            text = "── 实时日志 ──"; textSize = 13f; setPadding(0, 8, 0, 4)
+        })
+        logText = TextView(this).apply {
+            textSize = 10f; setPadding(0, 0, 0, 0); setMinHeight(120)
+        }
+        layout.addView(logText)
+
         scroll.addView(layout); setContentView(scroll)
         handler.post(diagRunnable)
     }
@@ -76,6 +117,26 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun testConnection() {
+        val ws = WebSocketClient(
+            onAction = {},
+            onConnected = { runOnUiThread { statusText.text = "✅ 测试连接成功" } },
+            onSessionEstablished = { runOnUiThread { statusText.text = "✅ 测试会话建立成功" } },
+            onDisconnected = { runOnUiThread { statusText.text = "❌ 测试连接断开" } }
+        )
+        ws.connect()
+        statusText.text = "🔍 测试连接中..."
+    }
+
+    private fun testTap() {
+        if (!InputService.isRunning()) {
+            statusText.text = "❌ 无障碍服务未运行"
+            return
+        }
+        val ok = InputService.tap(540, 960)
+        statusText.text = if (ok) "✅ 测试点击成功 (540,960)" else "❌ 测试点击失败"
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == CAPTURE_REQ && resultCode == RESULT_OK && data != null) {
@@ -85,16 +146,58 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun updateDiagnostics() {
+    private fun updatePanel() {
+        // 诊断面板
         val sb = StringBuilder()
-        sb.appendLine("📱 ${SessionState.deviceId}")
-        sb.appendLine("WebSocket: ${if (SessionState.isConnected) "🟢" else "🔴"}")
-        sb.appendLine("无障碍: ${if (PermissionManager.isAccessibilityEnabled(this)) "🟢" else "🔴"}")
-        sb.appendLine("截图: ${if (CaptureService.isRunning()) "🟢" else "🔴"}")
-        if (SessionState.sessionId.isNotEmpty()) sb.appendLine("🆔 ${SessionState.sessionId.take(8)}")
-        sb.appendLine("📸 ${SessionState.totalScreenshots}  🎯 ${SessionState.totalActions}")
-        if (SessionState.lastError.isNotEmpty()) sb.appendLine("❌ ${SessionState.lastError}")
-        diagnosticsText.text = sb.toString()
+        sb.appendLine("╔══════════════════════════")
+        sb.appendLine("║ 📱 ${SessionState.deviceId}")
+        val sid = SessionState.sessionId
+        if (sid.isNotEmpty()) sb.appendLine("║ 🆔 ${sid.take(8)}...")
+        sb.appendLine("╠══════════════════════════")
+
+        // 网络状态
+        sb.append("║ WebSocket: ")
+        sb.appendLine(if (SessionState.isConnected) "🟢 Connected" else "🔴 Disconnected")
+        sb.appendLine("║ Server: ${ConfigManager.serverUrl}")
+
+        // 心跳
+        sb.appendLine("║ Heartbeat: ↑${SessionState.heartbeatSent} ↓${SessionState.heartbeatReceived}")
+        if (SessionState.pingMs > 0) sb.appendLine("║ Latency: ${SessionState.pingMs}ms")
+
+        // 截图 & 上传
+        sb.appendLine("║ Screenshot: ${SessionState.totalScreenshots}")
+        sb.appendLine("║ Upload: ${SessionState.totalUploads}")
+        if (SessionState.lastUploadSize > 0)
+            sb.appendLine("║ Last upload: ${SessionState.lastUploadSize / 1024}KB")
+
+        // 动作
+        sb.appendLine("║ Action: ${SessionState.totalActions}")
+        if (SessionState.lastActionType.isNotEmpty())
+            sb.appendLine("║ Last: ${SessionState.lastActionType}")
+
+        // 手势
+        sb.appendLine("║ Gesture: ${SessionState.totalGestures}")
+        sb.appendLine("║   ✓${SessionState.gestureSuccess}  ✗${SessionState.gestureFail}")
+
+        // 无障碍 & 截图服务
+        sb.append("║ Accessibility: ")
+        sb.appendLine(if (PermissionManager.isAccessibilityEnabled(this)) "🟢" else "🔴")
+        sb.append("║ Capture: ")
+        sb.appendLine(if (CaptureService.isRunning()) "🟢" else "🔴")
+
+        // 错误
+        if (SessionState.lastError.isNotEmpty()) {
+            sb.appendLine("╠══════════════════════════")
+            sb.appendLine("║ ❌ ${SessionState.lastError}")
+        }
+
+        sb.appendLine("╚══════════════════════════")
+        panelText.text = sb.toString()
+
+        // 日志窗口（只显示最近 15 条）
+        val logs = SessionState.logs()
+        val recent = if (logs.size > 15) logs.subList(logs.size - 15, logs.size) else logs
+        logText.text = recent.joinToString("\n")
     }
 
     companion object { private const val CAPTURE_REQ = 1001 }

@@ -10,7 +10,6 @@ import com.luoking.agent.services.WebSocketClient
 
 /**
  * 服务控制器 — 统一管理所有服务的启停
- * MainActivity 只调用这里，不直接操作服务
  */
 object ServiceController {
     private var wsClient: WebSocketClient? = null
@@ -22,6 +21,7 @@ object ServiceController {
         isRunning = true
         SessionState.isRunning = true
         onStatus("连接中...")
+        SessionState.addLog("Starting...")
 
         wsClient = WebSocketClient(
             onAction = { action -> ActionDispatcher.execute(action, wsClient!!) },
@@ -44,11 +44,18 @@ object ServiceController {
         stopScreenshotLoop()
         wsClient?.disconnect()
         wsClient = null
+        SessionState.addLog("Stopped")
     }
 
     fun startCaptureService(activity: Activity, resultCode: Int, data: Intent) {
         CaptureService.setCallback { base64 ->
-            if (base64 != null) wsClient?.sendUpload(base64)
+            if (base64 != null) {
+                SessionState.totalScreenshots++
+                wsClient?.sendUpload(base64)
+            } else {
+                SessionState.lastError = "截图失败"
+                SessionState.addLog("Screenshot failed")
+            }
         }
         val intent = Intent(activity, CaptureService::class.java).apply {
             putExtra("result_code", resultCode); putExtra("data", data)
@@ -57,6 +64,7 @@ object ServiceController {
             activity.startForegroundService(intent)
         else
             activity.startService(intent)
+        SessionState.addLog("Capture service started")
     }
 
     private fun startScreenshotLoop() {
@@ -67,6 +75,7 @@ object ServiceController {
                 try { Thread.sleep(1500) } catch (_: InterruptedException) { break }
             }
         }.also { it.start() }
+        SessionState.addLog("Screenshot loop started")
     }
 
     private fun stopScreenshotLoop() {

@@ -9,7 +9,7 @@ import java.util.concurrent.TimeUnit
 
 /**
  * WebSocket 客户端 — 唯一职责：连接、收发、心跳、重连
- * 不能解析AI、不能决定动作、不能截图
+ * 所有事件写日志到 SessionState
  */
 class WebSocketClient(
     private val onAction: (JSONObject) -> Unit,
@@ -36,11 +36,13 @@ class WebSocketClient(
         shouldRun = true
         state = State.CONNECTING
         SessionState.reset()
+        SessionState.addLog("Connecting to ${ConfigManager.serverUrl}...")
         val req = Request.Builder().url(ConfigManager.serverUrl).build()
         ws = client.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 state = State.CONNECTED
                 SessionState.isConnected = true
+                SessionState.addLog("Connected")
                 onConnected()
                 sendHeartbeat()
             }
@@ -54,38 +56,55 @@ class WebSocketClient(
                             if (sid.isNotEmpty()) {
                                 state = State.SESSION_ESTABLISHED
                                 SessionState.sessionId = sid
+                                SessionState.heartbeatReceived++
+                                SessionState.lastHeartbeatAckTime = System.currentTimeMillis()
                                 Log.d(TAG, "session_id: $sid")
+                                SessionState.addLog("Heartbeat ACK, session=${sid.take(8)}")
                                 onSessionEstablished()
                                 startHeartbeat()
                             }
                         }
                         "action" -> {
                             if (state < State.SESSION_ESTABLISHED) return
+                            SessionState.totalActions++
                             SessionState.lastActionTime = System.currentTimeMillis()
+                            SessionState.lastActionType = json.optString("action_type", "?")
+                            SessionState.addLog("Action: ${SessionState.lastActionType}")
                             onAction(json)
                         }
                         "error" -> {
-                            SessionState.lastError = json.optString("message", "")
-                            Log.e(TAG, "服务器错误: ${SessionState.lastError}")
+                            val msg = json.optString("message", "")
+                            SessionState.lastError = msg
+                            SessionState.addLog("Server error: $msg")
+                            Log.e(TAG, "服务器错误: $msg")
                         }
                     }
                 } catch (e: Exception) {
                     SessionState.lastError = "消息解析失败: ${e.message}"
+                    SessionState.addLog("Parse error: ${e.message}")
                 }
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 SessionState.lastError = "连接关闭: $reason (code=$code)"
+                SessionState.addLog("Closed: $reason (code=$code)")
                 cleanup(); onDisconnected(); reconnect()
             }
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                SessionState.lastError = t.message ?: "未知连接错误"
+                val msg = t.message ?: "未知连接错误"
+                SessionState.lastError = msg
+                SessionState.addLog("Failure: $msg")
                 cleanup(); onDisconnected(); if (shouldRun) reconnect()
             }
         })
     }
 
-    fun disconnect() { shouldRun = false; cleanup(); ws?.close(1000, "用户断开") }
+    fun disconnect() {
+        shouldRun = false
+        cleanup()
+        ws?.close(1000, "用户断开")
+        SessionState.addLog("Disconnected by user")
+    }
 
     private fun cleanup() {
         heartbeatThread?.interrupt(); heartbeatThread = null
@@ -94,9 +113,12 @@ class WebSocketClient(
 
     fun sendHeartbeat() {
         if (state < State.CONNECTED) return
+        val now = System.currentTimeMillis()
+        SessionState.lastHeartbeatTime = now
+        SessionState.heartbeatSent++
         ws?.send(JSONObject().apply {
             put("type", "heartbeat"); put("device_id", SessionState.deviceId)
-            put("ts", System.currentTimeMillis() / 1000)
+            put("ts", now / 1000)
             if (state >= State.SESSION_ESTABLISHED) put("session_id", SessionState.sessionId)
         }.toString())
     }
@@ -104,11 +126,15 @@ class WebSocketClient(
     fun sendUpload(base64: String) {
         if (state < State.SESSION_ESTABLISHED) return
         val sid = SessionState.sessionId; if (sid.isEmpty()) return
-        SessionState.lastUploadTime = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        SessionState.lastUploadTime = now
+        SessionState.totalUploads++
+        SessionState.lastUploadSize = base64.length.toLong()
+        SessionState.addLog("Upload ${base64.length}B")
         ws?.send(JSONObject().apply {
             put("type", "upload"); put("device_id", SessionState.deviceId)
             put("session_id", sid); put("image", base64)
-            put("ts", System.currentTimeMillis() / 1000)
+            put("ts", now / 1000)
         }.toString())
     }
 
@@ -134,6 +160,7 @@ class WebSocketClient(
 
     private fun reconnect() {
         Thread {
+            SessionState.addLog("Reconnecting in ${ConfigManager.reconnectDelay}ms...")
             try { Thread.sleep(ConfigManager.reconnectDelay); if (shouldRun) connect() }
             catch (_: InterruptedException) {}
         }.start()
