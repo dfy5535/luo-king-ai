@@ -7,7 +7,7 @@ object ConfigManager {
     private lateinit var prefs: SharedPreferences
 
     var serverUrl: String
-        get() = prefs.getString("server_url", "ws://193.112.187.72:8765") ?: "ws://193.112.187.72:8765"
+        get() = prefs.getString("server_url", "ws://193.112.187.72:8765/ws") ?: "ws://193.112.187.72:8765/ws"
         set(v) { prefs.edit().putString("server_url", v).apply() }
 
     var screenshotInterval: Long
