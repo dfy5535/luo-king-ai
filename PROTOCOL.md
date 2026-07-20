@@ -1,0 +1,192 @@
+# 洛克王国 AI 助手 · 通信协议 v1.0
+
+## 传输层
+
+- 协议：WebSocket（ws://）
+- 编码：UTF-8
+- 格式：JSON（所有消息顶级字段 `type` 区分类型）
+- 心跳：每 5 秒客户端发送 `heartbeat`，服务器回复 `heartbeat_ack`
+- 重连：客户端指数退避 3s → 6s → 12s → 24s → 30s(max)
+
+---
+
+## 消息类型
+
+### 1. 客户端 → 服务器：心跳
+
+```json
+{
+  "type": "heartbeat",
+  "device_id": "phone_a1b2c3",
+  "phase": "battle",
+  "battery": 85,
+  "ts": 1712345678
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| type | string | ✓ | 固定 `"heartbeat"` |
+| device_id | string | ✓ | 设备唯一标识，APK 启动时生成 |
+| phase | string | | 当前游戏阶段，如 `"battle"` `"lobby"` `"unknown"` |
+| battery | int | | 电量百分比 0-100 |
+| ts | int | ✓ | 客户端 Unix 时间戳（秒） |
+
+---
+
+### 2. 服务器 → 客户端：心跳确认
+
+```json
+{
+  "type": "heartbeat_ack",
+  "server_time": 1712345678,
+  "session_id": "sess_abc123"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| type | string | ✓ | 固定 `"heartbeat_ack"` |
+| server_time | int | ✓ | 服务器 Unix 时间戳（秒） |
+| session_id | string | | 服务器分配的会话 ID |
+
+---
+
+### 3. 客户端 → 服务器：上传截图
+
+```json
+{
+  "type": "upload",
+  "device_id": "phone_a1b2c3",
+  "image": "/9j/4AAQ...",
+  "ts": 1712345678
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| type | string | ✓ | 固定 `"upload"` |
+| device_id | string | ✓ | 设备唯一标识 |
+| image | string | ✓ | JPEG 截图，Base64 编码，100-300KB |
+| ts | int | ✓ | 客户端 Unix 时间戳（秒） |
+
+---
+
+### 4. 服务器 → 客户端：动作指令
+
+```json
+{
+  "type": "action",
+  "action_type": "skill",
+  "skill_index": 2,
+  "coordinate": [650, 1000],
+  "delay_ms": 800,
+  "reasoning": "斩杀线，使用烈焰冲锋",
+  "session_id": "sess_abc123"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| type | string | ✓ | 固定 `"action"` |
+| action_type | string | ✓ | 动作类型（见下方 action_type 表） |
+| skill_index | int | | 技能按钮索引（1-4），仅 `action_type="skill"` 时使用 |
+| swap_index | int | | 换宠按钮索引（1-3），仅 `action_type="swap"` 时使用 |
+| coordinate | [int, int] | | 绝对坐标 [x, y]，`action_type="tap"` 时使用 |
+| delay_ms | int | | 执行前等待毫秒数，默认 500 |
+| reasoning | string | | 决策理由，用于日志和调试 |
+| session_id | string | | 服务器分配的会话 ID |
+
+**action_type 取值：**
+
+| 值 | 含义 | 客户端行为 |
+|----|------|-----------|
+| `"skill"` | 使用技能 | 根据 `skill_index` 点击技能按钮 |
+| `"swap"` | 换宠 | 根据 `swap_index` 点击换宠按钮 |
+| `"tap"` | 点击坐标 | 根据 `coordinate` 点击绝对坐标 |
+| `"back"` | 返回键 | 模拟系统返回键 |
+| `"wait"` | 等待 | 不点击，仅等待 `delay_ms` |
+
+---
+
+### 5. 客户端 → 服务器：执行结果
+
+```json
+{
+  "type": "action_result",
+  "device_id": "phone_a1b2c3",
+  "success": true,
+  "ts": 1712345679
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| type | string | ✓ | 固定 `"action_result"` |
+| device_id | string | ✓ | 设备唯一标识 |
+| success | bool | ✓ | 是否执行成功 |
+| ts | int | ✓ | 客户端 Unix 时间戳（秒） |
+
+---
+
+### 6. 服务器 → 客户端：错误
+
+```json
+{
+  "type": "error",
+  "message": "未知消息类型: xxx",
+  "code": "UNKNOWN_TYPE"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| type | string | ✓ | 固定 `"error"` |
+| message | string | ✓ | 错误描述 |
+| code | string | | 错误码 |
+
+---
+
+## 协议版本记录
+
+| 版本 | 日期 | 变更 |
+|------|------|------|
+| v1.0 | 2026-07-19 | 初始协议定义：heartbeat / upload / action / action_result / error |
+
+---
+
+## 协议约束
+
+1. 所有消息顶级字段必须包含 `type`
+2. 所有时间戳字段名为 `ts`，值为 Unix 秒级整数
+3. 所有坐标字段为 `[x, y]` 格式，`x` 和 `y` 均为整数
+4. 服务器不依赖客户端提供的 `device_id` 做安全校验（仅用于日志和会话管理）
+5. 客户端收到无法识别的 `action_type` 时，按 `"wait"` 处理并记录警告
+6. 服务器收到无法识别的 `type` 时，返回 `error` 消息
+
+## session_id 生命周期规则
+
+```
+客户端                              服务器
+  │                                    │
+  ├── heartbeat(device_id, ts) ──────→  │ 首次心跳，无 session_id
+  │                                    ├── 生成 session_id
+  │ ←── heartbeat_ack(session_id) ────  │
+  │                                    │
+  ├── upload(session_id, image, ts) ──→ │ 首次截图，带 session_id
+  │ ←── action(session_id, ...) ──────  │
+  │                                    │
+  ├── action_result(session_id, ...) ──→│
+  │                                    │
+  ... (重复上传 → 动作 → 回执) ...
+  │                                    │
+  │ 连接断开/重连                       │
+  ├── heartbeat(device_id, ts) ──────→  │ 新连接，session_id 重置
+  │ ←── heartbeat_ack(new_session_id)   │ 重新分配
+```
+
+1. 服务器在首次收到 `heartbeat` 时生成 `session_id`，在 `heartbeat_ack` 中返回
+2. 客户端在收到 `heartbeat_ack` 之前，只发 `device_id` + `ts`，不发 `session_id`
+3. 客户端拿到 `session_id` 后，所有上行消息（`upload` / `action_result`）都必须携带
+4. 重连时 `session_id` 失效，客户端重置，重新走首次握手
+5. 服务器收到不带 `session_id` 的 `upload` 时，应丢弃并返回 `wait` 指令

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">洛克王国AI助手</string>
+    <string name="accessibility_description">洛克王国AI助手的无障碍服务，用于截图和执行点击操作</string>
+    <string name="connect">连接</string>
+    <string name="disconnect">断开</string>
+    <string name="server_address">服务器地址</string>
+    <string name="status_ready">就绪</string>
+    <string name="status_connected">已连接</string>
+    <string name="status_disconnected">已断开</string>
+</resources>

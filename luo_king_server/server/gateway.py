@@ -1,0 +1,459 @@
+"""
+luo_king_server/server/gateway.py
+===================================
+Cloud Gateway——WebSocket服务器。
+
+通信协议：PROTOCOL.md（唯一真理）
+两端必须严格一致，任何修改须同步更新 PROTOCOL.md。
+
+session_id 生命周期规则：
+1. 服务器在首次收到 heartbeat 时生成 session_id，在 heartbeat_ack 中返回
+2. 客户端在收到 heartbeat_ack 之前，只发 device_id + ts，不发 session_id
+3. 客户端拿到 session_id 后，所有上行消息（upload / action_result）都必须携带
+4. 重连时 session_id 失效，客户端重置，重新走首次握手
+5. 服务器收到不带 session_id 的 upload 时，应丢弃并返回 wait 指令
+"""
+
+from __future__ import annotations
+import asyncio
+import json
+import logging
+import time
+import uuid
+import base64
+import os
+from typing import Dict, Optional, Set, Any
+from dataclasses import asdict
+
+logger = logging.getLogger(__name__)
+
+try:
+    import websockets
+except ImportError:
+    websockets = None
+
+
+class SessionState:
+    """单台设备的会话状态"""
+    def __init__(self, device_id: str):
+        self.device_id = device_id
+        self.session_id = uuid.uuid4().hex[:12]
+        self.battle_id: Optional[str] = None
+        self.phase: str = "unknown"
+        self.turn_number: int = 0
+        self.last_heartbeat: float = time.time()
+        self.battle_start_time: float = 0.0
+        self.consecutive_failures: int = 0
+
+
+class WebSocketGateway:
+    """
+    WebSocket 网关。
+    
+    职责：
+    - 接收客户端上传的截图
+    - 路由到 Vision → Memory → Engine → Strategy → Rule
+    - 返回动作给客户端
+    - 维护会话状态
+    - 心跳检测
+    - 日志和监控
+    """
+    
+    def __init__(self, vision_parser, battle_engine, strategy_agent, rule_agent, memory_manager):
+        self.vision_parser = vision_parser
+        self.battle_engine = battle_engine
+        self.strategy_agent = strategy_agent
+        self.rule_agent = rule_agent
+        self.memory_manager = memory_manager
+        
+        # 会话管理
+        self.sessions: Dict[str, SessionState] = {}  # device_id → session
+        self.websocket_map: Dict[str, Any] = {}      # device_id → websocket
+        
+        # 监控
+        self.total_requests = 0
+        self.total_errors = 0
+        self.avg_response_time = 0.0
+    
+    # ──────────────────────────────────────────────────────────────
+    # 消息处理（协议定义见 PROTOCOL.md）
+    # ──────────────────────────────────────────────────────────────
+    
+    async def handle_message(self, websocket, message: str):
+        """处理收到的消息"""
+        try:
+            data = json.loads(message)
+            msg_type = data.get("type", "")
+            
+            if msg_type == "heartbeat":
+                await self._handle_heartbeat(websocket, data)
+            elif msg_type == "upload":
+                await self._handle_upload(websocket, data)
+            elif msg_type == "action_result":
+                await self._handle_action_result(data)
+            else:
+                await self._send(websocket, {
+                    "type": "error",
+                    "message": f"未知消息类型: {msg_type}",
+                    "code": "UNKNOWN_TYPE"
+                })
+        except json.JSONDecodeError:
+            await self._send(websocket, {
+                "type": "error",
+                "message": "JSON格式错误",
+                "code": "INVALID_JSON"
+            })
+        except Exception as e:
+            self.total_errors += 1
+            logger.error(f"消息处理失败: {e}", exc_info=True)
+            await self._send(websocket, {
+                "type": "error",
+                "message": str(e),
+                "code": "INTERNAL_ERROR"
+            })
+    
+    async def _handle_heartbeat(self, websocket, data: Dict):
+        """处理心跳"""
+        device_id = data.get("device_id", "")
+        session_id = data.get("session_id", "")
+        
+        if device_id not in self.sessions:
+            # 首次连接，生成新 session
+            self.sessions[device_id] = SessionState(device_id)
+            self.websocket_map[device_id] = websocket
+            logger.info(f"新设备连接: {device_id}, session_id={self.sessions[device_id].session_id}")
+        else:
+            # 已有 session，检查是否同连接
+            existing_session = self.sessions[device_id]
+            old_ws = self.websocket_map.get(device_id)
+            
+            if old_ws != websocket:
+                # 重连或新连接，生成新 session_id
+                logger.info(f"设备重连: {device_id}, 旧session={existing_session.session_id}, 生成新session")
+                existing_session.session_id = uuid.uuid4().hex[:12]
+                self.websocket_map[device_id] = websocket
+        
+        session = self.sessions[device_id]
+        session.last_heartbeat = time.time()
+        session.phase = data.get("phase", session.phase)
+        
+        await self._send(websocket, {
+            "type": "heartbeat_ack",
+            "server_time": int(time.time()),
+            "session_id": session.session_id,
+        })
+    
+    async def _handle_upload(self, websocket, data: Dict):
+        """
+        处理截图上传——核心路径。
+        
+        数据流：
+        APK截图 → Base64 → Vision → Memory → Engine → Strategy → Rule → 返回动作
+        
+        session_id 校验：
+        - 必须携带 session_id
+        - session_id 必须与当前会话匹配
+        - 不符合则丢弃并返回 wait 指令
+        """
+        device_id = data.get("device_id", "")
+        image_base64 = data.get("image", "")
+        session_id = data.get("session_id", "")
+        
+        # session_id 校验
+        if not session_id or device_id not in self.sessions:
+            logger.warning(f"未授权的 upload: device_id={device_id}, session_id={session_id}")
+            await self._send(websocket, {
+                "type": "action",
+                "action_type": "wait",
+                "delay_ms": 1000,
+                "reasoning": "未授权，请先完成心跳握手",
+                "session_id": session_id,
+            })
+            return
+        
+        session = self.sessions[device_id]
+        if session.session_id != session_id:
+            logger.warning(f"session_id 不匹配: expected={session.session_id}, got={session_id}")
+            await self._send(websocket, {
+                "type": "action",
+                "action_type": "wait",
+                "delay_ms": 1000,
+                "reasoning": "session_id 不匹配，请重新连接",
+                "session_id": session_id,
+            })
+            return
+        self.total_requests += 1
+        start_time = time.time()
+        
+        # 1. Vision：SenseNova视觉解析
+        vision_result = self.vision_parser.parse_base64(image_base64)
+        if vision_result.confidence < 0.70:
+            session.consecutive_failures += 1
+            await self._send(websocket, {
+                "type": "action",
+                "action_type": "wait",
+                "delay_ms": 1000,
+                "reasoning": f"视觉置信度过低({vision_result.confidence:.2f})，等待重试",
+                "session_id": session.session_id,
+            })
+            return
+        
+        session.consecutive_failures = 0
+        session.phase = vision_result.phase or "unknown"
+        session.turn_number = vision_result.turn or 0
+        
+        # 2. VisionResult → BattleState
+        battle_state = self._vision_to_battle_state(vision_result)
+        
+        # 3. 更新Memory
+        memory = self.memory_manager.get(device_id)
+        if not memory:
+            battle_id = f"battle_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+            memory = self.memory_manager.new_battle(device_id, battle_id)
+            logger.info(f"新战斗: {device_id} → {battle_id}")
+        memory.update_from_battle_state(battle_state)
+        
+        # 4. 非战斗阶段：程序控制
+        if session.phase != "battle" or not battle_state.is_my_turn:
+            action = self._handle_non_battle_phase(session.phase, session.session_id)
+            await self._send(websocket, action)
+            return
+        
+        # 5. Battle Engine分析
+        self.battle_engine.update_state(battle_state)
+        recommendation = self.battle_engine.analyze()
+        
+        # 6. Strategy Agent博弈决策
+        memory_context = memory.get_full_context() if memory else ""
+        action = self.strategy_agent.decide(battle_state, recommendation, memory_context)
+        
+        # 7. Rule Agent合法性验证（最后一道防线）
+        validation = self.rule_agent.validate(action, battle_state)
+        if not validation.valid:
+            logger.warning(f"规则验证失败: {validation.violations}")
+            valid_actions = self.rule_agent.validate_all_actions(battle_state)
+            if valid_actions and recommendation.skill_scores:
+                best = None; best_score = -1
+                for va in valid_actions:
+                    if va.action_type.value == "skill":
+                        for s in recommendation.skill_scores:
+                            if s.skill_name == va.target and s.score > best_score:
+                                best_score = s.score; best = va
+                if best: action = best; action.reasoning = f"规则修正: {validation.suggestion}"
+                elif valid_actions: action = valid_actions[0]
+        
+        # 8. 记录记忆
+        memory.record_my_action(battle_state.turn_number, f"{action.action_type.value}:{action.target}")
+        self.memory_manager.save(device_id)
+        
+        # 9. 构建返回动作
+        response_time = time.time() - start_time
+        self.avg_response_time = self.avg_response_time * 0.9 + response_time * 0.1
+        
+        server_action = self._build_server_action(action, session.session_id)
+        server_action["reasoning"] = f"{action.reasoning} (耗时{response_time*1000:.0f}ms)"
+        
+        await self._send(websocket, server_action)
+    
+    def _vision_to_battle_state(self, vision_result) -> Any:
+        """将VisionResult转换为BattleState"""
+        from ..core.models import BattleState, PetState, SkillState, PetType, WeatherType, GamePhase, BattleActionType
+        from ..vision.llm_parser import VisionResult
+        
+        bs = BattleState()
+        bs.screenshot_timestamp = time.time()
+        bs.parse_confidence = vision_result.confidence
+        
+        phase_map = {"battle":GamePhase.战斗,"lobby":GamePhase.大厅,"matching":GamePhase.匹配中,
+                     "pet_select":GamePhase.选宠,"settlement":GamePhase.结算,"login":GamePhase.登录}
+        bs.phase = phase_map.get(vision_result.phase or "", GamePhase.未知)
+        bs.turn_number = vision_result.turn or 0
+        bs.is_my_turn = (vision_result.phase == "battle")
+        
+        weather_map = {"sunny":WeatherType.晴天,"rainy":WeatherType.雨天,"snowstorm":WeatherType.暴风雪,
+                       "sandstorm":WeatherType.沙暴,"mist":WeatherType.迷雾}
+        bs.weather = weather_map.get(vision_result.weather or "", WeatherType.无)
+        
+        if vision_result.self:
+            pet = PetState(name=vision_result.self.pet_name, hp_current=vision_result.self.hp, hp_max=vision_result.self.hp_max, is_active=True)
+            for s in vision_result.self.skills:
+                pet.skills.append(SkillState(name=s.name, pp_current=s.pp, pp_max=s.pp_max))
+            bs.my_active = pet; bs.my_pets.append(pet)
+        
+        if vision_result.enemy:
+            enemy = PetState(name=vision_result.enemy.pet_name, hp_current=vision_result.enemy.hp, hp_max=vision_result.enemy.hp_max, is_active=True)
+            bs.enemy_pet = enemy
+        
+        return bs
+    
+    def _handle_non_battle_phase(self, phase: str, session_id: str) -> Dict:
+        """非战斗阶段返回预设动作"""
+        base = {
+            "login": ("tap", [960, 600], 3000, "自动登录"),
+            "lobby": ("tap", [960, 650], 2000, "开始匹配"),
+            "matching": ("wait", None, 3000, "等待匹配"),
+            "pet_select": ("tap", [960, 800], 2000, "自动选宠"),
+            "settlement": ("tap", [960, 900], 3000, "结算确认"),
+        }
+        entry = base.get(phase, ("wait", None, 2000, "等待"))
+        result = {
+            "type": "action",
+            "action_type": entry[0],
+            "delay_ms": entry[2],
+            "reasoning": entry[3],
+            "session_id": session_id,
+        }
+        if entry[1]:
+            result["coordinate"] = entry[1]
+        return result
+    
+    def _build_server_action(self, action, session_id: str) -> Dict:
+        """构建返回给客户端的动作（协议 v1.0）"""
+        result = {
+            "type": "action",
+            "action_type": action.action_type.value,
+            "delay_ms": 800,
+            "reasoning": action.reasoning,
+            "session_id": session_id,
+        }
+        
+        if action.skill_index is not None:
+            result["skill_index"] = action.skill_index
+        if action.action_type.value == "swap":
+            result["swap_index"] = 1
+        if action.action_type.value == "tap":
+            result["coordinate"] = [960, 540]
+        
+        return result
+    
+    async def _handle_action_result(self, data: Dict):
+        """处理客户端执行结果"""
+        device_id = data.get("device_id", "")
+        success = data.get("success", False)
+        if not success:
+            logger.warning(f"设备 {device_id} 执行失败")
+    
+    async def _send(self, websocket, data: Dict):
+        """发送消息"""
+        try:
+            await websocket.send(json.dumps(data, ensure_ascii=False))
+        except Exception as e:
+            logger.error(f"发送失败: {e}")
+    
+    # ──────────────────────────────────────────────────────────────
+    # 连接管理
+    # ──────────────────────────────────────────────────────────────
+    
+    async def on_connect(self, websocket):
+        logger.info(f"新WebSocket连接")
+    
+    async def on_disconnect(self, websocket):
+        for device_id, ws in list(self.websocket_map.items()):
+            if ws == websocket:
+                logger.info(f"设备断开: {device_id}")
+                self.memory_manager.remove(device_id)
+                self.sessions.pop(device_id, None)
+                self.websocket_map.pop(device_id, None)
+                break
+    
+    # ──────────────────────────────────────────────────────────────
+    # 监控接口
+    # ──────────────────────────────────────────────────────────────
+    
+    def get_status(self) -> Dict:
+        devices = []
+        for device_id, session in self.sessions.items():
+            devices.append({
+                "device_id": device_id,
+                "phase": session.phase,
+                "turn": session.turn_number,
+                "last_heartbeat": time.time() - session.last_heartbeat,
+                "consecutive_failures": session.consecutive_failures,
+            })
+        return {
+            "devices_online": len(self.sessions),
+            "total_requests": self.total_requests,
+            "total_errors": self.total_errors,
+            "avg_response_time_ms": self.avg_response_time * 1000,
+            "devices": devices,
+        }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 服务器入口
+# ──────────────────────────────────────────────────────────────────────
+
+async def run_server(host: str = "0.0.0.0", port: int = 8765):
+    """启动WebSocket服务器"""
+    if websockets is None:
+        logger.error("websockets 未安装: pip install websockets")
+        return
+    
+    from openai import OpenAI
+    import os
+    
+    vision_client = OpenAI(
+        api_key=os.getenv("SENSENOVA_API_KEY"),
+        base_url="https://token.sensenova.cn/v1"
+    )
+    strategy_client = OpenAI(
+        api_key=os.getenv("STRATEGY_API_KEY", os.getenv("SENSENOVA_API_KEY")),
+        base_url=os.getenv("STRATEGY_BASE_URL", "https://token.sensenova.cn/v1")
+    )
+    
+    from ..vision.llm_parser import LLMVisionParser
+    from ..engine.battle_engine import BattleEngine
+    from ..engine.battle_memory import BattleMemoryManager
+    from ..agents.strategy_agent import StrategyAgent
+    from ..agents.rule_agent import RuleAgent
+    
+    gateway = WebSocketGateway(
+        vision_parser=LLMVisionParser(llm_client=vision_client, model=os.getenv("VISION_MODEL", "sensenova-6.7-flash-lite")),
+        battle_engine=BattleEngine(),
+        strategy_agent=StrategyAgent(llm_client=strategy_client, model=os.getenv("STRATEGY_MODEL", "gemini-2.5-flash")),
+        rule_agent=RuleAgent(),
+        memory_manager=BattleMemoryManager(data_dir=os.getenv("MEMORY_DIR", "data/memory")),
+    )
+    
+    async def handler(websocket):
+        await gateway.on_connect(websocket)
+        try:
+            async for message in websocket:
+                await gateway.handle_message(websocket, message)
+        finally:
+            await gateway.on_disconnect(websocket)
+    
+    async def status_handler(request):
+        """HTTP状态接口"""
+        if request.path == "/status":
+            status = gateway.get_status()
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps(status, ensure_ascii=False, indent=2)
+            )
+        return web.Response(status=404)
+    
+    logger.info(f"WebSocket 服务器启动: ws://{host}:{port}")
+    logger.info(f"状态接口: http://{host}:{port}/status")
+    
+    async def start():
+        from aiohttp import web
+        app = web.Application()
+        app.router.add_get("/status", status_handler)
+        
+        ws_server = await websockets.serve(handler, host, port)
+        
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, host, port + 1)
+        await site.start()
+        
+        logger.info(f"服务器已就绪")
+        await asyncio.Future()
+    
+    await start()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    asyncio.run(run_server())

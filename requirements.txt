@@ -1,0 +1,21 @@
+# luo_king_agent - 视觉驱动的游戏智能体
+# 依赖清单
+
+# 核心
+pydantic==2.*
+python-dotenv==1.*
+
+# 视觉（OCR）
+# paddlepaddle==2.6.*        # 按需：PaddleOCR后端
+# paddleocr==2.8.*           # 按需：OCR引擎
+# opencv-python==4.9.*       # 按需：图像处理
+
+# ADB
+# adb-shell==0.4.*           # 按需：Python ADB实现
+
+# 日志
+rich==13.*                   # 格式化日志输出
+
+# 测试
+pytest==8.*
+pytest-asyncio==0.*
