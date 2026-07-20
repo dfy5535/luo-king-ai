@@ -36,6 +36,7 @@ object SessionState {
     // 弹幕/思维
     var currentThought: String = ""
     var currentBattleState: String = ""
+    var lastError: String = ""
     private val _thoughts = mutableListOf<String>()
     fun thoughts(): List<String> = _thoughts.toList()
 
