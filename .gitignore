@@ -20,6 +20,9 @@ build/
 .DS_Store
 Thumbs.db
 
+# Backup
+.backup/
+
 # Environment
 .env
 *.log
