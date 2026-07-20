@@ -28,9 +28,11 @@ object ServiceController {
             onAction = { action -> ActionDispatcher.execute(action, wsClient!!) },
             onConnected = { activity.runOnUiThread { onStatus("已连接，等待 session_id...") } },
             onSessionEstablished = {
-                activity.runOnUiThread { onStatus("运行中") }
-                OverlayManager.show(activity)
-                startScreenshotLoop()
+                activity.runOnUiThread {
+                    onStatus("运行中")
+                    OverlayManager.show(activity)
+                    startScreenshotLoop()
+                }
             },
             onDisconnected = {
                 activity.runOnUiThread { onStatus("已断开") }

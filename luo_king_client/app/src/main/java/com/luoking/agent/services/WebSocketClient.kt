@@ -33,6 +33,10 @@ class WebSocketClient(
     fun isEstablished(): Boolean = state == State.SESSION_ESTABLISHED
 
     fun connect() {
+        if (state != State.DISCONNECTED) {
+            SessionState.addLog("Already connecting, skipping")
+            return
+        }
         shouldRun = true
         state = State.CONNECTING
         SessionState.reset()
@@ -103,7 +107,7 @@ class WebSocketClient(
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 SessionState.lastError = "连接关闭: $reason (code=$code)"
                 SessionState.addLog("Closed: $reason (code=$code)")
-                cleanup(); onDisconnected(); reconnect()
+                cleanup(); onDisconnected(); if (shouldRun) reconnect()
             }
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                 val msg = t.message ?: "未知连接错误"
