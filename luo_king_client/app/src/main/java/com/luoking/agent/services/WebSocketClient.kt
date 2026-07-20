@@ -57,7 +57,7 @@ class WebSocketClient(
                     when (json.optString("type", "")) {
                         "heartbeat_ack" -> {
                             val sid = json.optString("session_id", "")
-                            if (sid.isNotEmpty()) {
+                            if (sid.isNotEmpty() && state < State.SESSION_ESTABLISHED) {
                                 state = State.SESSION_ESTABLISHED
                                 SessionState.sessionId = sid
                                 SessionState.heartbeatReceived++
@@ -66,6 +66,10 @@ class WebSocketClient(
                                 SessionState.addLog("Heartbeat ACK, session=${sid.take(8)}")
                                 onSessionEstablished()
                                 startHeartbeat()
+                            } else if (sid.isNotEmpty()) {
+                                // 已建立连接后，只更新计数，不触发回调
+                                SessionState.heartbeatReceived++
+                                SessionState.lastHeartbeatAckTime = System.currentTimeMillis()
                             }
                         }
                         "action" -> {

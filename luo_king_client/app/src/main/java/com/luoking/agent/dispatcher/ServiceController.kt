@@ -74,9 +74,16 @@ object ServiceController {
 
     private fun startScreenshotLoop() {
         stopScreenshotLoop()
+        if (!CaptureService.isRunning()) {
+            SessionState.addLog("⚠ CaptureService not running, screenshot loop delayed")
+        }
         screenshotThread = Thread {
             while (isRunning && wsClient?.isEstablished() == true) {
-                CaptureService.requestScreenshot()
+                if (CaptureService.isRunning()) {
+                    CaptureService.requestScreenshot()
+                } else {
+                    SessionState.lastError = "截图服务未运行"
+                }
                 try { Thread.sleep(1500) } catch (_: InterruptedException) { break }
             }
         }.also { it.start() }
