@@ -16,6 +16,6 @@ object SessionState {
         sessionId = ""
         isConnected = false
         isRunning = false
-        lastError = ""
+        // 不清空 lastError——UI 需要显示它
     }
 }

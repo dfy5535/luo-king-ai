@@ -69,11 +69,19 @@ class WebSocketClient(
                             Log.e(TAG, "服务器错误: ${SessionState.lastError}")
                         }
                     }
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    SessionState.lastError = "消息解析失败: ${e.message}"
+                }
             }
 
-            override fun onClosed(ws: WebSocket, code: Int, reason: String) { cleanup(); onDisconnected(); reconnect() }
-            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) { cleanup(); onDisconnected(); if (shouldRun) reconnect() }
+            override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+                SessionState.lastError = "连接关闭: $reason (code=$code)"
+                cleanup(); onDisconnected(); reconnect()
+            }
+            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+                SessionState.lastError = t.message ?: "未知连接错误"
+                cleanup(); onDisconnected(); if (shouldRun) reconnect()
+            }
         })
     }
 
