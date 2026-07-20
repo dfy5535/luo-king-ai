@@ -39,7 +39,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from luo_king_server.core.protocol import envelope
+from luo_king_server.core.protocol import envelope, decision_envelope
 from luo_king_server.core.models import BattleContext
 from luo_king_server.server.connection_manager import connection_manager
 from luo_king_server.server.device_manager import device_manager
@@ -104,7 +104,7 @@ async def handle_upload(ws: WebSocket, data: dict, seq: int) -> dict:
     if info:
         info.total_uploads += 1
 
-    # 发送 thought：开始分析
+    # 发送 thought 1: 收到截图
     await ws.send_text(json.dumps(envelope("thought", text="📸 收到截图，正在分析战场...", seq=seq)))
 
     # 构建 BattleContext
@@ -115,29 +115,28 @@ async def handle_upload(ws: WebSocket, data: dict, seq: int) -> dict:
         screenshot=image
     )
 
-    # 通过 MessageBus 发布（Pipeline 和所有订阅者都会收到）
+    # 通过 MessageBus 发布
     await bus.publish("upload", ctx=ctx, data=data)
 
-    # 发送 thought：开始处理
-    await ws.send_text(json.dumps(envelope("thought", text="🧠 正在调用 BattlePipeline...", seq=seq)))
+    # 发送 thought 2: 调用 Pipeline
+    await ws.send_text(json.dumps(envelope("thought", text="🧠 分析敌方配置...", seq=seq)))
 
     # 执行 Pipeline
     ctx = await pipeline.execute(ctx)
 
-    # 从 context 中提取 action
+    # 从 context 中提取决策
     action = ctx.final_action if ctx.final_action else {
-        "type": "action",
-        "action_type": "tap",
-        "coordinate": [540, 960],
-        "delay_ms": 500,
-        "session_id": sid,
-        "trace_id": ctx.trace_id
+        "type": "decision",
+        "think": {"stage": "分析", "reason": "默认决策", "confidence": 0.5},
+        "decision": {"action": "wait", "target": "", "reason": "无数据"},
+        "execute": {"type": "tap", "coordinate": [540, 960], "delay_ms": 500, "session_id": sid}
     }
 
-    # 发送 thought：决策完成
-    action_type = action.get("action_type", "tap")
+    # 发送 thought 3: 决策完成
+    decision_action = action.get("decision", {}).get("action", "?")
+    think_reason = action.get("think", {}).get("reason", "?")
     await ws.send_text(json.dumps(envelope("thought",
-        text=f"✅ 决策完成: {action_type}",
+        text=f"✅ 决策: {decision_action} — {think_reason}",
         seq=seq)))
 
     if info:

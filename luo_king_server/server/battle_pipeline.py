@@ -51,14 +51,28 @@ class BattlePipeline:
         return ctx
 
     async def _fallback(self, ctx: BattleContext) -> BattleContext:
-        """测试模式：固定返回 tap 动作"""
+        """测试模式：返回结构化决策（think + decision + execute）"""
         log.info(f"[pipeline/test] device={ctx.device_id} session={ctx.session_id[:8] if ctx.session_id else '?'}")
         ctx.final_action = {
-            "type": "action",
-            "action_type": "tap",
-            "coordinate": [540, 960],
-            "delay_ms": 500,
-            "session_id": ctx.session_id
+            "type": "decision",
+            "think": {
+                "stage": "观察战场",
+                "reason": "敌方冰龙王在场，我方烈火战神被克制",
+                "confidence": 0.87
+            },
+            "decision": {
+                "action": "swap",
+                "target": "圣光迪莫",
+                "reason": "光系克制龙系，预计造成2倍伤害"
+            },
+            "execute": {
+                "type": "tap",
+                "coordinate": [540, 960],
+                "delay_ms": 800,
+                "skill_index": -1,
+                "swap_index": 2,
+                "session_id": ctx.session_id
+            }
         }
         return ctx
 

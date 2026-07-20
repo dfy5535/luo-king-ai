@@ -1,6 +1,7 @@
 package com.luoking.agent.services
 
 import android.util.Log
+import com.luoking.agent.dispatcher.ActionDispatcher
 import com.luoking.agent.managers.ConfigManager
 import com.luoking.agent.models.SessionState
 import okhttp3.*
@@ -67,10 +68,17 @@ class WebSocketClient(
                                 onSessionEstablished()
                                 startHeartbeat()
                             } else if (sid.isNotEmpty()) {
-                                // 已建立连接后，只更新计数，不触发回调
                                 SessionState.heartbeatReceived++
                                 SessionState.lastHeartbeatAckTime = System.currentTimeMillis()
                             }
+                        }
+                        "decision" -> {
+                            // 结构化决策：think + decision + execute
+                            if (state < State.SESSION_ESTABLISHED) return
+                            SessionState.totalActions++
+                            SessionState.lastActionTime = System.currentTimeMillis()
+                            SessionState.addLog("📊 Decision received")
+                            ActionDispatcher.enqueueDecision(json, this@WebSocketClient)
                         }
                         "action" -> {
                             if (state < State.SESSION_ESTABLISHED) return
@@ -78,7 +86,6 @@ class WebSocketClient(
                             SessionState.lastActionTime = System.currentTimeMillis()
                             SessionState.lastActionType = json.optString("action_type", "?")
                             SessionState.addLog("Action: ${SessionState.lastActionType}")
-                            SessionState.addThought("执行: ${json.optString("action_type", "?")}")
                             onAction(json)
                         }
                         "thought" -> {

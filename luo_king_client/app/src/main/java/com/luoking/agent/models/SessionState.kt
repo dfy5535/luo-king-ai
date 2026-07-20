@@ -49,6 +49,55 @@ object SessionState {
         currentThought = msg
     }
 
+    // ─── HUD 双轨状态 ───
+
+    // HUD 面板 1: 👀 看见
+    var hudEnemyName: String = "?"
+    var hudEnemyHp: Int = 0
+    var hudMyName: String = "?"
+    var hudMyHp: Int = 0
+    var hudWeather: String = ""
+
+    // HUD 面板 2: 🧠 思考
+    var hudThinkStage: String = "等待中..."
+    var hudThinkReason: String = ""
+    var hudThinkConfidence: Float = 0f
+    var hudDecisionAction: String = ""
+    var hudDecisionTarget: String = ""
+    var hudDecisionReason: String = ""
+
+    // HUD 面板 3: 👉 动作
+    var hudExecuteType: String = ""
+    var hudExecuteX: Int = 0
+    var hudExecuteY: Int = 0
+    var hudExecuteDelay: Long = 800L
+    var hudActionCountdown: Int = 0   // 3, 2, 1, 0
+    var hudActionStage: String = "等待"  // 等待 / 即将执行 / 已执行
+
+    fun updateDecision(think: org.json.JSONObject?, decision: org.json.JSONObject?, execute: org.json.JSONObject?) {
+        if (think != null) {
+            hudThinkStage = think.optString("stage", "分析中")
+            hudThinkReason = think.optString("reason", "")
+            hudThinkConfidence = think.optDouble("confidence", 0.0).toFloat()
+        }
+        if (decision != null) {
+            hudDecisionAction = decision.optString("action", "")
+            hudDecisionTarget = decision.optString("target", "")
+            hudDecisionReason = decision.optString("reason", "")
+        }
+        if (execute != null) {
+            hudExecuteType = execute.optString("type", "tap")
+            val coord = execute.optJSONArray("coordinate")
+            if (coord != null && coord.length() >= 2) {
+                hudExecuteX = coord.getInt(0)
+                hudExecuteY = coord.getInt(1)
+            }
+            hudExecuteDelay = execute.optLong("delay_ms", 800L)
+            hudActionCountdown = 3
+            hudActionStage = "即将执行"
+        }
+    }
+
     // 实时日志（最多 50 条）
     private val _logs = mutableListOf<String>()
     fun logs(): List<String> = _logs.toList()
