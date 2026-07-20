@@ -26,5 +26,6 @@ android {
 }
 
 dependencies {
-    // 0 依赖 — 纯 Android 平台 API
+    // Stage 1: WebSocket
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
