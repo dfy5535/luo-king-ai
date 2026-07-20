@@ -22,7 +22,7 @@
         </activity>
 
         <service
-            android:name=".AccessibilityInputService"
+            android:name=".services.InputService"
             android:exported="true"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
@@ -34,7 +34,7 @@
         </service>
 
         <service
-            android:name=".ScreenCaptureService"
+            android:name=".services.CaptureService"
             android:foregroundServiceType="mediaProjection"
             android:exported="false" />
     </application>
