@@ -7,4 +7,6 @@ object MessageTypes {
     const val ACTION = "action"
     const val ACTION_RESULT = "action_result"
     const val ERROR = "error"
+    const val THOUGHT = "thought"
+    const val BATTLE_STATE = "battle_state"
 }

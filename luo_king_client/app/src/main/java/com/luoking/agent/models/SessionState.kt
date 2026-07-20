@@ -33,8 +33,20 @@ object SessionState {
     var pingMs: Long = 0
     var lastUploadSize: Long = 0
 
-    // 错误
-    var lastError: String = ""
+    // 弹幕/思维
+    var currentThought: String = ""
+    var currentBattleState: String = ""
+    private val _thoughts = mutableListOf<String>()
+    fun thoughts(): List<String> = _thoughts.toList()
+
+    fun addThought(msg: String) {
+        val line = "${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())} 💭 $msg"
+        synchronized(_thoughts) {
+            _thoughts.add(line)
+            if (_thoughts.size > 20) _thoughts.removeAt(0)
+        }
+        currentThought = msg
+    }
 
     // 实时日志（最多 50 条）
     private val _logs = mutableListOf<String>()

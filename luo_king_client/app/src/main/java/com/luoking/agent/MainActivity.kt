@@ -198,6 +198,14 @@ class MainActivity : Activity() {
         val logs = SessionState.logs()
         val recent = if (logs.size > 15) logs.subList(logs.size - 15, logs.size) else logs
         logText.text = recent.joinToString("\n")
+
+        // 思维弹幕日志
+        val thoughts = SessionState.thoughts()
+        if (thoughts.isNotEmpty()) {
+            val recentThoughts = if (thoughts.size > 8) thoughts.subList(thoughts.size - 8, thoughts.size) else thoughts
+            sb.appendLine("╠══ 思维弹幕 ══╣")
+            recentThoughts.forEach { sb.appendLine("║ $it") }
+        }
     }
 
     companion object { private const val CAPTURE_REQ = 1001 }

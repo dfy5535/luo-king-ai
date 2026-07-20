@@ -70,7 +70,22 @@ class WebSocketClient(
                             SessionState.lastActionTime = System.currentTimeMillis()
                             SessionState.lastActionType = json.optString("action_type", "?")
                             SessionState.addLog("Action: ${SessionState.lastActionType}")
+                            SessionState.addThought("执行: ${json.optString("action_type", "?")}")
                             onAction(json)
+                        }
+                        "thought" -> {
+                            val text = json.optString("text", "")
+                            if (text.isNotEmpty()) {
+                                SessionState.addThought(text)
+                                SessionState.addLog("💭 $text")
+                            }
+                        }
+                        "battle_state" -> {
+                            val state = json.optJSONObject("state")
+                            if (state != null) {
+                                SessionState.currentBattleState = state.toString()
+                                SessionState.addLog("📊 BattleState updated")
+                            }
                         }
                         "error" -> {
                             val msg = json.optString("message", "")

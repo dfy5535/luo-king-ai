@@ -104,6 +104,9 @@ async def handle_upload(ws: WebSocket, data: dict, seq: int) -> dict:
     if info:
         info.total_uploads += 1
 
+    # 发送 thought：开始分析
+    await ws.send_text(json.dumps(envelope("thought", text="📸 收到截图，正在分析战场...", seq=seq)))
+
     # 构建 BattleContext
     ctx = BattleContext(
         device_id=device_id,
@@ -114,6 +117,9 @@ async def handle_upload(ws: WebSocket, data: dict, seq: int) -> dict:
 
     # 通过 MessageBus 发布（Pipeline 和所有订阅者都会收到）
     await bus.publish("upload", ctx=ctx, data=data)
+
+    # 发送 thought：开始处理
+    await ws.send_text(json.dumps(envelope("thought", text="🧠 正在调用 BattlePipeline...", seq=seq)))
 
     # 执行 Pipeline
     ctx = await pipeline.execute(ctx)
@@ -127,6 +133,12 @@ async def handle_upload(ws: WebSocket, data: dict, seq: int) -> dict:
         "session_id": sid,
         "trace_id": ctx.trace_id
     }
+
+    # 发送 thought：决策完成
+    action_type = action.get("action_type", "tap")
+    await ws.send_text(json.dumps(envelope("thought",
+        text=f"✅ 决策完成: {action_type}",
+        seq=seq)))
 
     if info:
         info.total_actions += 1
