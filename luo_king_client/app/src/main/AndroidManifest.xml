@@ -40,9 +40,5 @@
             android:name=".services.CaptureService"
             android:foregroundServiceType="mediaProjection"
             android:exported="false" />
-        <service
-            android:name=".services.OverlayHUD"
-            android:foregroundServiceType="dataSync"
-            android:exported="false" />
     </application>
 </manifest>

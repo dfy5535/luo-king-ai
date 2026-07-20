@@ -6,7 +6,7 @@ import android.os.Build
 import com.luoking.agent.managers.PermissionManager
 import com.luoking.agent.models.SessionState
 import com.luoking.agent.services.CaptureService
-import com.luoking.agent.services.OverlayHUD
+import com.luoking.agent.services.OverlayManager
 import com.luoking.agent.services.WebSocketClient
 
 /**
@@ -29,7 +29,7 @@ object ServiceController {
             onConnected = { activity.runOnUiThread { onStatus("已连接，等待 session_id...") } },
             onSessionEstablished = {
                 activity.runOnUiThread { onStatus("运行中") }
-                OverlayHUD.start(activity)
+                OverlayManager.show(activity)
                 startScreenshotLoop()
             },
             onDisconnected = {
@@ -46,7 +46,7 @@ object ServiceController {
         stopScreenshotLoop()
         wsClient?.disconnect()
         wsClient = null
-        OverlayHUD.stop()
+        OverlayManager.hide()
         SessionState.addLog("Stopped")
     }
 
