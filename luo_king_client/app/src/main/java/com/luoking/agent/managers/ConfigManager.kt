@@ -6,9 +6,12 @@ import android.content.SharedPreferences
 object ConfigManager {
     private lateinit var prefs: SharedPreferences
 
+    // 锁死常量，绝不经过 SharedPreferences 拼接
+    const val SERVER_URL: String = "ws://193.112.187.72:8765/ws"
+
     var serverUrl: String
-        get() = prefs.getString("server_url", "ws://192.168.10.189:8765/ws") ?: "ws://192.168.10.189:8765/ws"
-        set(v) { prefs.edit().putString("server_url", v).apply() }
+        get() = SERVER_URL
+        set(_) { /* 只读，不允许修改 */ }
 
     var screenshotInterval: Long
         get() = prefs.getLong("screenshot_interval", 1500L)
