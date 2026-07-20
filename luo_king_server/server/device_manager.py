@@ -12,7 +12,6 @@ log = logging.getLogger("device_manager")
 
 
 class DeviceInfo:
-    """单个设备的状态——没有 WebSocket，没有 BattleState"""
     def __init__(self, device_id: str):
         self.device_id: str = device_id
         self.session_id: str = ""
@@ -27,12 +26,6 @@ class DeviceInfo:
 
 
 class DeviceManager:
-    """
-    设备管理器
-    只保存 device_id → session_id 映射和设备统计
-    WebSocket 绑定在 ConnectionManager
-    BattleState 在 BattleContext
-    """
     def __init__(self):
         self._devices: dict[str, DeviceInfo] = {}
 
@@ -54,7 +47,6 @@ class DeviceManager:
 
     def remove(self, device_id: str):
         self._devices.pop(device_id, None)
-        log.info(f"[remove] device={device_id}")
 
     def all_devices(self) -> list[DeviceInfo]:
         return list(self._devices.values())

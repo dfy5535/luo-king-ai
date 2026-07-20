@@ -3,7 +3,6 @@ SessionManager — 会话生命周期管理
 session_id → { device_id, last_heartbeat }
 不保存 WebSocket（由 ConnectionManager 负责）
 不保存 BattleState（由 BattleContext 负责）
-不保存 Memory（由 BattleMemory 负责）
 """
 import uuid
 import time
@@ -54,15 +53,10 @@ class SessionManager:
     def get_session(self, device_id: str) -> Optional[str]:
         return self._device_sessions.get(device_id)
 
-    def get_device_id(self, session_id: str) -> Optional[str]:
-        info = self._sessions.get(session_id)
-        return info.device_id if info else None
-
     def remove(self, session_id: str):
         info = self._sessions.pop(session_id, None)
         if info:
             self._device_sessions.pop(info.device_id, None)
-            log.info(f"[remove] session={session_id[:8]}")
 
     def cleanup_stale(self):
         now = time.time()
@@ -70,8 +64,6 @@ class SessionManager:
                  if now - info.last_active > self._timeout]
         for sid in stale:
             self.remove(sid)
-        if stale:
-            log.info(f"[cleanup] removed {len(stale)} stale sessions")
 
     def count(self) -> int:
         return len(self._sessions)

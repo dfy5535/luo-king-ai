@@ -1,50 +1,51 @@
 """
 洛克王国 AI 服务器 — 主入口
 
-FastAPI 只负责协议，不负责 AI。
-所有消息路由到 MessageRouter，BattlePipeline 负责 AI 决策链。
+最终架构（冻结版，半年内不改）:
 
-最终架构:
-  Android APK
-    │
-    ├── CaptureManager
-    ├── InputManager
-    ├── ConnectionManager
-    └── ConfigManager
+Android APK
+├── CaptureManager
+├── InputManager
+├── ConnectionManager
+└── ConfigManager
         │
         ▼
-      WebSocket /ws
+WebSocket (/ws)
         │
         ▼
 FastAPI Gateway
-    │
-    ├── MessageRouter     ← 唯一业务入口
-    ├── ConnectionManager ← session_id → WebSocket
-    ├── DeviceManager     ← device_id → session_id（无 ws/无 battle_state）
-    ├── SessionManager    ← session_id → device_id（无 ws/无 battle_state）
-    └── BattlePipeline    ← 可插拔流水线
-           ├── Vision
-           ├── Memory
-           ├── Engine
-           ├── Strategy
-           ├── Rule
-           ├── Replay
-           └── Learning
-    │
-    ▼
-   HTTP: /health /status /metrics
+    ├── ConnectionManager    ← session_id → WebSocket
+    ├── MessageDispatcher    ← 注册化 handler，无 if/else
+    ├── SessionManager       ← session_id → device_id
+    ├── DeviceManager        ← device_id → stats
+    ├── MessageBus           ← 消息总线（Pipeline/Replay/Statistics 等订阅）
+    └── BattlePipeline       ← 可插拔流水线
+           ├── VisionPlugin
+           ├── MemoryPlugin
+           ├── EnginePlugin
+           ├── StrategyPlugin
+           ├── RulePlugin
+           ├── ReplayPlugin
+           └── LearningPlugin
+        │
+        ▼
+HTTP: /health /status /metrics
 """
 import json
 import logging
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from luo_king_server.server.message_router import router
+from luo_king_server.core.protocol import envelope
+from luo_king_server.core.models import BattleContext
+from luo_king_server.server.connection_manager import connection_manager
 from luo_king_server.server.device_manager import device_manager
 from luo_king_server.server.session_manager import session_manager
-from luo_king_server.server.connection_manager import connection_manager
+from luo_king_server.server.message_dispatcher import dispatcher
+from luo_king_server.server.message_bus import bus
 from luo_king_server.server.battle_pipeline import pipeline
 
 logging.basicConfig(
@@ -58,16 +59,95 @@ log = logging.getLogger("gateway")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("🚀 Gateway 启动")
+    log.info("=" * 50)
+    log.info("  🚀 洛克王国 AI Gateway 启动")
+    log.info(f"  Pipeline: {pipeline.plugin_names() or '[测试模式]'}")
+    log.info("=" * 50)
     yield
     log.info("🛑 Gateway 关闭")
 
 
 app = FastAPI(
     title="洛克王国 AI Gateway",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan
 )
+
+
+# ─── Handlers（注册到 MessageDispatcher） ───
+
+async def handle_heartbeat(ws: WebSocket, data: dict, seq: int) -> dict:
+    device_id = data.get("device_id", "unknown")
+    battery = data.get("battery", 0)
+
+    sid = session_manager.get_session(device_id)
+    if not sid:
+        sid = session_manager.create(device_id)
+
+    connection_manager.register(sid, ws)
+    device_manager.touch(device_id, session_id=sid, battery=battery)
+
+    log.info(f"[heartbeat] device={device_id} session={sid[:8]}")
+    return envelope("heartbeat_ack", session_id=sid, seq=seq)
+
+
+async def handle_upload(ws: WebSocket, data: dict, seq: int) -> dict:
+    device_id = data.get("device_id", "")
+    sid = data.get("session_id", "")
+    image = data.get("image", "")
+
+    if not session_manager.validate(device_id, sid):
+        return envelope("error", message="invalid session_id", seq=seq)
+
+    device_manager.touch(device_id)
+    info = device_manager.get(device_id)
+    if info:
+        info.total_uploads += 1
+
+    # 构建 BattleContext
+    ctx = BattleContext(
+        device_id=device_id,
+        session_id=sid,
+        trace_id=data.get("trace_id", uuid.uuid4().hex[:12]),
+        screenshot=image
+    )
+
+    # 通过 MessageBus 发布（Pipeline 和所有订阅者都会收到）
+    await bus.publish("upload", ctx=ctx, data=data)
+
+    # 执行 Pipeline
+    ctx = await pipeline.execute(ctx)
+
+    # 从 context 中提取 action
+    action = ctx.final_action if ctx.final_action else {
+        "type": "action",
+        "action_type": "tap",
+        "coordinate": [540, 960],
+        "delay_ms": 500,
+        "session_id": sid,
+        "trace_id": ctx.trace_id
+    }
+
+    if info:
+        info.total_actions += 1
+
+    return action
+
+
+async def handle_action_result(ws: WebSocket, data: dict, seq: int) -> dict:
+    device_id = data.get("device_id", "")
+    success = data.get("success", False)
+    log.info(f"[action_result] device={device_id} success={success}")
+
+    # 通过 MessageBus 发布（Statistics/Replay 等订阅）
+    await bus.publish("action_result", device_id=device_id, success=success, data=data)
+    return {}
+
+
+# 注册 handler
+dispatcher.register("heartbeat", handle_heartbeat)
+dispatcher.register("upload", handle_upload)
+dispatcher.register("action_result", handle_action_result)
 
 
 # ─── HTTP API ───
@@ -84,7 +164,11 @@ async def status():
         "sessions": session_manager.count(),
         "connections": connection_manager.count(),
         "test_mode": pipeline.test_mode,
-        "pipeline_stages": len(pipeline._stages) if hasattr(pipeline, '_stages') else 0,
+        "pipeline_plugins": pipeline.plugin_names(),
+        "bus_subscribers": {
+            "upload": bus.count_subscribers("upload"),
+            "action_result": bus.count_subscribers("action_result"),
+        }
     }
 
 
@@ -107,7 +191,7 @@ async def metrics():
         "total_devices": len(devices),
         "total_sessions": session_manager.count(),
         "total_connections": connection_manager.count(),
-        "pipeline_stages": len(pipeline._stages) if hasattr(pipeline, '_stages') else 0,
+        "pipeline_plugins": pipeline.plugin_names(),
         "test_mode": pipeline.test_mode,
         "ts": time.time(),
     }
@@ -120,16 +204,19 @@ async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     log.info(f"[connect] {ws.client}")
 
-    current_device_id: str = ""
-
     try:
         while True:
             raw = await ws.receive_text()
 
-            # 路由到 MessageRouter（Gateway 不处理任何业务逻辑）
-            response = await router.route(ws, raw)
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                await ws.send_text(json.dumps(envelope("error", message="invalid JSON")))
+                continue
 
-            # 发送响应（如果非空）
+            # 通过 MessageDispatcher 分发（无 if/else）
+            response = await dispatcher.dispatch(ws, data)
+
             if response:
                 await ws.send_text(json.dumps(response))
 
@@ -149,6 +236,6 @@ if __name__ == "__main__":
     log.info("  洛克王国 AI Gateway")
     log.info(f"  WebSocket: ws://0.0.0.0:8765/ws")
     log.info(f"  HTTP:      http://0.0.0.0:8765/health")
-    log.info(f"  Test mode: {pipeline.test_mode}")
+    log.info(f"  Pipeline:  {pipeline.plugin_names() or '[测试模式]'}")
     log.info("=" * 50)
     uvicorn.run(app, host="0.0.0.0", port=8765, log_level="info")

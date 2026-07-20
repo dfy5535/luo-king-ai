@@ -1,10 +1,13 @@
 """
 数据模型 — 唯一状态描述
-BattleState/BattleContext/Memory 三者独立，不存入 Session
+BattleContext 是统一上下文，贯穿整个流水线
+BasePlugin 是所有插件基类
 """
 from dataclasses import dataclass, field
+from typing import Optional, Any
 
-# ─── 精灵属性 ───
+
+# ─── 精灵属性系统 ───
 
 ELEMENT_TYPES = {
     "火", "水", "草", "电", "冰", "地", "翼", "萌",
@@ -79,30 +82,39 @@ class BattleState:
 @dataclass
 class BattleContext:
     """
-    战斗上下文——独立于 Session
-    包含当前战斗的全部非持久状态
+    统一上下文——贯穿整个流水线
+    每个插件只操作 context，不关心其他插件
     """
-    battle_id: str = ""
-    state: BattleState = field(default_factory=BattleState)
-    action_history: list = field(default_factory=list)
-    started_at: float = 0.0
+    # 输入
+    device_id: str = ""
+    session_id: str = ""
+    trace_id: str = ""
+    screenshot: str = ""
 
+    # Vision 输出
+    vision_raw: dict = field(default_factory=dict)
+    battle_state: Optional[BattleState] = None
 
-@dataclass
-class BattleMemory:
-    """
-    战斗记忆——独立于 Session
-    包含所有精灵数据、技能、属性克制等持久知识
-    """
-    pet_database: dict = field(default_factory=dict)      # name → Pet
-    skill_database: dict = field(default_factory=dict)    # name → Skill
-    battle_history: list = field(default_factory=list)    # 历史战斗记录
+    # Memory 输出
+    memory: dict = field(default_factory=dict)
+
+    # Engine 输出
+    engine_recommendation: dict = field(default_factory=dict)
+
+    # Strategy 输出
+    strategy_recommendation: dict = field(default_factory=dict)
+
+    # Rule 输出
+    final_action: dict = field(default_factory=dict)
+
+    # 指标（所有插件共享）
+    metrics: dict = field(default_factory=dict)
+    errors: list = field(default_factory=list)
 
 
 @dataclass
 class Action:
-    """动作指令——从服务器发给 APK"""
-    action_type: str  # "tap" | "skill_1" | "skill_2" | "skill_3" | "skill_4" | "swap_2" | "swap_3" | ...
+    action_type: str
     coordinate: tuple = (0, 0)
     delay_ms: int = 500
     session_id: str = ""
@@ -110,8 +122,21 @@ class Action:
 
 @dataclass
 class ActionResult:
-    """动作执行结果——从 APK 发回服务器"""
     success: bool
     device_id: str = ""
     session_id: str = ""
     error: str = ""
+
+
+# ─── BasePlugin ───
+
+class BasePlugin:
+    """
+    插件基类
+    所有流水线插件继承此类
+    """
+    name: str = "base"
+
+    async def process(self, ctx: BattleContext) -> BattleContext:
+        """处理上下文，返回更新后的上下文"""
+        raise NotImplementedError

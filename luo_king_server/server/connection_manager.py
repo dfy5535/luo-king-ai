@@ -4,6 +4,7 @@ session_id → WebSocket
 不与 DeviceManager 耦合，支持断线重连后重新绑定
 """
 import logging
+import json
 from typing import Optional
 from fastapi import WebSocket
 
@@ -14,15 +15,15 @@ class ConnectionManager:
     """
     连接管理器
     只负责 session_id → WebSocket 的映射
-    DeviceManager 不保存 WebSocket，ConnectionManager 不保存 device_id
+    FastAPI 官方推荐模式
     """
     def __init__(self):
-        self._connections: dict[str, WebSocket] = {}  # session_id → WebSocket
+        self._connections: dict[str, WebSocket] = {}
 
     def register(self, session_id: str, ws: WebSocket):
         old = self._connections.get(session_id)
         if old:
-            log.info(f"[register] replacing old connection for session={session_id[:8]}")
+            log.info(f"[register] replacing old connection session={session_id[:8]}")
         self._connections[session_id] = ws
 
     def unregister(self, session_id: str):
@@ -31,15 +32,12 @@ class ConnectionManager:
     def get(self, session_id: str) -> Optional[WebSocket]:
         return self._connections.get(session_id)
 
-    def send(self, session_id: str, data: dict) -> bool:
-        """发送消息，返回是否成功"""
+    async def send(self, session_id: str, data: dict) -> bool:
         ws = self._connections.get(session_id)
         if not ws:
             return False
         try:
-            import json
-            import asyncio
-            asyncio.ensure_future(ws.send_text(json.dumps(data)))
+            await ws.send_text(json.dumps(data))
             return True
         except Exception as e:
             log.error(f"[send] session={session_id[:8]}: {e}")

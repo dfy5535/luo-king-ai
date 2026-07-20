@@ -1,10 +1,13 @@
 """
 BattlePipeline — 可插拔战斗流水线
-Vision → Memory → Engine → Strategy → Rule → Replay → Learning
-每层通过 register() 注册，可独立替换/升级/测试
+使用 BasePlugin 基类 + 依赖注入
+所有插件操作统一的 BattleContext
 """
 import logging
-from typing import Callable, Awaitable
+import time
+from typing import Optional
+
+from luo_king_server.core.models import BasePlugin, BattleContext
 
 log = logging.getLogger("battle_pipeline")
 
@@ -12,57 +15,58 @@ log = logging.getLogger("battle_pipeline")
 class BattlePipeline:
     """
     战斗流水线
-    支持插件式注册：pipeline.register("vision", vision_module)
-    每层接收 (device_id, session_id, image, context) 返回更新后的 (action, context)
+    通过 add() 注册插件，依赖注入 VisionService/MemoryService 等
+    每个插件处理 BattleContext，返回 BattleContext
     """
     def __init__(self):
-        self._stages: list[tuple[str, Callable]] = []
+        self._plugins: list[BasePlugin] = []
         self.test_mode: bool = True
 
-    def register(self, name: str, handler: Callable[..., Awaitable[dict]]):
-        """
-        注册流水线阶段
-        handler 签名: async def handler(device_id, session_id, image, context) -> dict
-        返回的 dict 必须包含至少一个 key: "action" 或 "continue":False
-        """
-        self._stages.append((name, handler))
-        log.info(f"[register] stage={name} (total={len(self._stages)})")
+    def add(self, plugin: BasePlugin):
+        """添加插件到流水线"""
+        self._plugins.append(plugin)
+        log.info(f"[add] plugin={plugin.name} (total={len(self._plugins)})")
         if self.test_mode:
             self.test_mode = False
 
-    async def process(self, device_id: str, session_id: str, image_base64: str) -> dict:
-        """执行流水线"""
-        if self.test_mode or not self._stages:
-            return await self._fallback(device_id, session_id, image_base64)
+    def remove(self, name: str):
+        """移除插件"""
+        self._plugins = [p for p in self._plugins if p.name != name]
 
-        context = {}
-        for name, handler in self._stages:
+    async def execute(self, ctx: BattleContext) -> BattleContext:
+        """执行流水线——每个插件依次处理 context"""
+        if self.test_mode or not self._plugins:
+            return await self._fallback(ctx)
+
+        for plugin in self._plugins:
+            start = time.time()
             try:
-                result = await handler(device_id, session_id, image_base64, context)
-                if result.get("continue") is False:
-                    return result.get("action", self._default_action(session_id))
-                if "action" in result:
-                    return result["action"]
-                context.update(result)
+                ctx = await plugin.process(ctx)
+                ctx.metrics[f"{plugin.name}_ms"] = (time.time() - start) * 1000
             except Exception as e:
-                log.error(f"[pipeline] stage={name} error: {e}")
-                return self._default_action(session_id)
+                log.error(f"[execute] plugin={plugin.name}: {e}")
+                ctx.errors.append(f"{plugin.name}: {e}")
+                break
 
-        return self._default_action(session_id)
+        return ctx
 
-    async def _fallback(self, device_id: str, session_id: str, image_base64: str) -> dict:
+    async def _fallback(self, ctx: BattleContext) -> BattleContext:
         """测试模式：固定返回 tap 动作"""
-        log.info(f"[pipeline/test] device={device_id} session={session_id[:8]} image_size={len(image_base64)}B")
-        return self._default_action(session_id)
-
-    def _default_action(self, session_id: str) -> dict:
-        return {
+        log.info(f"[pipeline/test] device={ctx.device_id} session={ctx.session_id[:8] if ctx.session_id else '?'}")
+        ctx.final_action = {
             "type": "action",
             "action_type": "tap",
             "coordinate": [540, 960],
             "delay_ms": 500,
-            "session_id": session_id
+            "session_id": ctx.session_id
         }
+        return ctx
+
+    def plugin_count(self) -> int:
+        return len(self._plugins)
+
+    def plugin_names(self) -> list[str]:
+        return [p.name for p in self._plugins]
 
 
 # 全局单例
